@@ -181,17 +181,24 @@ The system automatically runs daily at 2:00 AM CET via EventBridge scheduler.
 ### Running Tests
 
 ```bash
-# Install test dependencies
-pip install pytest pytest-cov moto
+# Install development dependencies
+pip install -r requirements-dev.txt
 
-# Run unit tests
-pytest tests/unit
+# Run all tests with coverage
+./scripts/run_tests.sh
 
-# Run integration tests
-pytest tests/integration
+# Run unit tests only
+pytest tests/unit -v
 
-# Run with coverage
-pytest --cov=cloud_sync --cov=lambda_layer tests/
+# Run specific test file
+pytest tests/unit/test_provider_interface.py -v
+
+# Run with coverage report
+pytest tests/unit --cov=lambda_layer/python/cloud_sync_common --cov=cloud_sync --cov-report=html
+
+# View coverage report
+open htmlcov/index.html  # macOS
+xdg-open htmlcov/index.html  # Linux
 ```
 
 ### Local Development
