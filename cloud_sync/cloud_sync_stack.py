@@ -3,6 +3,7 @@
 from aws_cdk import (
     Stack,
     Tags,
+    aws_lambda as lambda_,
 )
 from constructs import Construct
 from typing import Optional
@@ -10,6 +11,7 @@ from .config import get_config
 from .storage_construct import StorageConstruct
 from .security_construct import SecurityConstruct
 from .vpc_construct import VPCConstruct
+from .lambda_construct import LambdaConstruct
 
 
 class CloudSyncStack(Stack):
@@ -61,4 +63,30 @@ class CloudSyncStack(Stack):
             "Security",
             sync_tracker_table=self.storage.sync_tracker_table,
             archive_bucket=self.storage.archive_bucket
+        )
+
+        # Create Lambda Layer with shared utilities
+        self.lambda_layer = lambda_.LayerVersion(
+            self,
+            "CloudSyncCommonLayer",
+            code=lambda_.Code.from_asset("lambda_layer"),
+            compatible_runtimes=[lambda_.Runtime.PYTHON_3_12],
+            description="Shared utilities for Cloud Sync Lambda functions",
+        )
+
+        # Create Lambda functions
+        self.lambdas = LambdaConstruct(
+            self,
+            "Lambdas",
+            lambda_layer=self.lambda_layer,
+            secrets_manager_secret_arn=f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:gopro/credentials-*",
+            dynamodb_table_name=self.storage.sync_tracker_table.table_name,
+            dynamodb_table_arn=self.storage.sync_tracker_table.table_arn,
+            s3_bucket_name=self.storage.archive_bucket.bucket_name,
+            s3_bucket_arn=self.storage.archive_bucket.bucket_arn,
+            kms_key_arn=self.storage.kms_key.key_arn,
+            sns_topic_arn=None,  # Will be added in Phase 5
+            vpc=self.vpc.vpc if self.vpc else None,
+            vpc_subnets=self.vpc.private_subnets if self.vpc else None,
+            security_group=self.vpc.lambda_security_group if self.vpc else None,
         )
