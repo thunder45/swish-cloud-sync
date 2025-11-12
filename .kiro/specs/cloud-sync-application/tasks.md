@@ -161,7 +161,7 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
 
 ## Phase 4: Workflow Orchestration
 
-- [ ] 8. Implement Step Functions state machine
+- [x] 8. Implement Step Functions state machine
   - Create state machine definition in CDK
   - Add AuthenticateProvider state with retry configuration
   - Add ListMedia state with retry configuration
@@ -178,7 +178,7 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Pass correlation_id through all state transitions
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 8.4_
 
-- [ ] 9. Implement EventBridge scheduler
+- [x] 9. Implement EventBridge scheduler
   - Create EventBridge rule with cron expression (2 AM CET daily)
   - Configure rule to trigger Step Functions state machine
   - Add input transformation to pass provider parameter

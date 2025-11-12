@@ -3,6 +3,7 @@
 from aws_cdk import (
     Stack,
     Tags,
+    CfnOutput,
     aws_lambda as lambda_,
 )
 from constructs import Construct
@@ -12,6 +13,7 @@ from .storage_construct import StorageConstruct
 from .security_construct import SecurityConstruct
 from .vpc_construct import VPCConstruct
 from .lambda_construct import LambdaConstruct
+from .orchestration_construct import OrchestrationConstruct
 
 
 class CloudSyncStack(Stack):
@@ -89,4 +91,57 @@ class CloudSyncStack(Stack):
             vpc=self.vpc.vpc if self.vpc else None,
             vpc_subnets=self.vpc.private_subnets if self.vpc else None,
             security_group=self.vpc.lambda_security_group if self.vpc else None,
+        )
+
+        # Create Step Functions orchestration
+        self.orchestration = OrchestrationConstruct(
+            self,
+            "Orchestration",
+            media_authenticator=self.lambdas.media_authenticator,
+            media_lister=self.lambdas.media_lister,
+            video_downloader=self.lambdas.video_downloader,
+            sns_topic=None,  # Will be added in Phase 5
+        )
+
+        # Stack outputs for observability and operations
+        CfnOutput(
+            self,
+            "StateMachineArn",
+            value=self.orchestration.state_machine.state_machine_arn,
+            description="GoPro Sync State Machine ARN",
+            export_name=f"{environment}-gopro-sync-state-machine-arn",
+        )
+
+        CfnOutput(
+            self,
+            "StateMachineConsoleUrl",
+            value=(
+                f"https://{self.region}.console.aws.amazon.com/states/home"
+                f"?region={self.region}#/statemachines/view/"
+                f"{self.orchestration.state_machine.state_machine_arn}"
+            ),
+            description="State Machine Console URL",
+        )
+
+        CfnOutput(
+            self,
+            "EventBridgeRuleName",
+            value=self.orchestration.scheduler_rule.rule_name,
+            description="EventBridge Daily Schedule Rule Name",
+        )
+
+        CfnOutput(
+            self,
+            "DynamoDBTableName",
+            value=self.storage.sync_tracker_table.table_name,
+            description="DynamoDB Sync Tracker Table",
+            export_name=f"{environment}-sync-tracker-table",
+        )
+
+        CfnOutput(
+            self,
+            "S3BucketName",
+            value=self.storage.archive_bucket.bucket_name,
+            description="S3 Archive Bucket",
+            export_name=f"{environment}-archive-bucket",
         )
