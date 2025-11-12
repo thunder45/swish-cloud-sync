@@ -37,3 +37,13 @@ class ValidationError(CloudSyncError):
 class StorageError(CloudSyncError):
     """Raised when storage operation fails."""
     pass
+
+
+class TransferError(CloudSyncError):
+    """Raised when video transfer fails."""
+    pass
+
+
+class ProviderError(CloudSyncError):
+    """Raised when cloud provider operation fails."""
+    pass

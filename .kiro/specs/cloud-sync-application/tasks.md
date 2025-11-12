@@ -94,7 +94,7 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
 
 ## Phase 3: Lambda Functions
 
-- [ ] 5. Implement Media Authenticator Lambda
+- [x] 5. Implement Media Authenticator Lambda
   - Create Lambda handler function
   - Configure Lambda with 256 MB memory, 30 second timeout
   - Integrate with Secrets Manager to retrieve credentials
@@ -106,13 +106,13 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Deploy Lambda in VPC private subnet (if VPC enabled)
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 7.6_
 
-- [ ] 5.1 Write unit tests for Media Authenticator
+- [x] 5.1 Write unit tests for Media Authenticator
   - Test token expiration logic
   - Test Secrets Manager integration
   - Test error handling for authentication failures
   - _Requirements: 2.2, 2.3, 2.5_
 
-- [ ] 6. Implement Media Lister Lambda
+- [x] 6. Implement Media Lister Lambda
   - Create Lambda handler function
   - Configure Lambda with 512 MB memory, 5 minute timeout
   - Call GoPro provider list_media method
@@ -124,13 +124,13 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Deploy Lambda in VPC private subnet (if VPC enabled)
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 4.2, 7.6_
 
-- [ ] 6.1 Write unit tests for Media Lister
+- [x] 6.1 Write unit tests for Media Lister
   - Test media filtering logic
   - Test DynamoDB batch query
   - Test pagination handling
   - _Requirements: 1.4, 1.5, 4.2_
 
-- [ ] 7. Implement Video Downloader Lambda
+- [x] 7. Implement Video Downloader Lambda
   - Create Lambda handler function
   - Configure Lambda with 1024 MB memory, 15 minute timeout
   - Set environment variables: CHUNK_SIZE=104857600 (100 MB), MULTIPART_THRESHOLD=104857600 (100 MB)
@@ -149,7 +149,7 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Deploy Lambda in VPC private subnet (if VPC enabled)
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 5.4, 5.5, 7.1, 7.2, 7.3, 7.6, 8.1, 8.2, 8.3, 10.3_
 
-- [ ] 7.1 Write unit tests for Video Downloader
+- [x] 7.1 Write unit tests for Video Downloader
   - Test idempotency logic
   - Test multipart upload for large files
   - Test direct upload for small files
