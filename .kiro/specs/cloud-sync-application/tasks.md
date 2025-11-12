@@ -73,7 +73,7 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
 
 ## Phase 2: GoPro Provider Implementation
 
-- [ ] 4. Implement GoPro provider class
+- [x] 4. Implement GoPro provider class
   - Create GoProProvider class implementing CloudProviderInterface
   - Implement OAuth 2.0 authentication with refresh token flow
   - Implement media listing with pagination (100 items per page)
@@ -83,7 +83,7 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Verify factory can instantiate GoPro provider by name
   - _Requirements: 1.1, 1.2, 2.2, 2.3, 11.3_
 
-- [ ]* 4.1 Write unit tests for GoPro provider
+- [x] 4.1 Write unit tests for GoPro provider
   - Test OAuth 2.0 authentication flow
   - Test token refresh logic
   - Test media listing pagination
@@ -106,7 +106,7 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Deploy Lambda in VPC private subnet (if VPC enabled)
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 7.6_
 
-- [ ]* 5.1 Write unit tests for Media Authenticator
+- [ ] 5.1 Write unit tests for Media Authenticator
   - Test token expiration logic
   - Test Secrets Manager integration
   - Test error handling for authentication failures
@@ -124,7 +124,7 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Deploy Lambda in VPC private subnet (if VPC enabled)
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 4.2, 7.6_
 
-- [ ]* 6.1 Write unit tests for Media Lister
+- [ ] 6.1 Write unit tests for Media Lister
   - Test media filtering logic
   - Test DynamoDB batch query
   - Test pagination handling
@@ -149,7 +149,7 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Deploy Lambda in VPC private subnet (if VPC enabled)
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 5.4, 5.5, 7.1, 7.2, 7.3, 7.6, 8.1, 8.2, 8.3, 10.3_
 
-- [ ]* 7.1 Write unit tests for Video Downloader
+- [ ] 7.1 Write unit tests for Video Downloader
   - Test idempotency logic
   - Test multipart upload for large files
   - Test direct upload for small files
