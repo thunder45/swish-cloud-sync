@@ -4,7 +4,11 @@ from aws_cdk import (
     Stack,
     Tags,
     CfnOutput,
+    Duration,
     aws_lambda as lambda_,
+    aws_sns as sns,
+    aws_sns_subscriptions as sns_subscriptions,
+    aws_sqs as sqs,
 )
 from constructs import Construct
 from typing import Optional
@@ -14,6 +18,7 @@ from .security_construct import SecurityConstruct
 from .vpc_construct import VPCConstruct
 from .lambda_construct import LambdaConstruct
 from .orchestration_construct import OrchestrationConstruct
+from .monitoring_construct import MonitoringConstruct
 
 
 class CloudSyncStack(Stack):
@@ -67,6 +72,43 @@ class CloudSyncStack(Stack):
             archive_bucket=self.storage.archive_bucket
         )
 
+        # Create SNS topic for alerts (Phase 5)
+        self.sns_topic = sns.Topic(
+            self,
+            "AlertTopic",
+            topic_name=f"{environment}-gopro-sync-alerts",
+            display_name="GoPro Sync Alerts",
+            master_key=None,  # Use AWS managed key for encryption
+        )
+
+        # Add email subscription (configure via environment variable or parameter)
+        # Uncomment and set email when deploying:
+        # self.sns_topic.add_subscription(
+        #     sns_subscriptions.EmailSubscription("ops-team@company.com")
+        # )
+
+        # Create Dead Letter Queues for Lambda functions (Phase 5)
+        self.dlqs = {
+            "media-authenticator": sqs.Queue(
+                self,
+                "MediaAuthenticatorDLQ",
+                queue_name=f"{environment}-media-authenticator-dlq",
+                retention_period=Duration.days(14),
+            ),
+            "media-lister": sqs.Queue(
+                self,
+                "MediaListerDLQ",
+                queue_name=f"{environment}-media-lister-dlq",
+                retention_period=Duration.days(14),
+            ),
+            "video-downloader": sqs.Queue(
+                self,
+                "VideoDownloaderDLQ",
+                queue_name=f"{environment}-video-downloader-dlq",
+                retention_period=Duration.days(14),
+            ),
+        }
+
         # Create Lambda Layer with shared utilities
         self.lambda_layer = lambda_.LayerVersion(
             self,
@@ -87,11 +129,16 @@ class CloudSyncStack(Stack):
             s3_bucket_name=self.storage.archive_bucket.bucket_name,
             s3_bucket_arn=self.storage.archive_bucket.bucket_arn,
             kms_key_arn=self.storage.kms_key.key_arn,
-            sns_topic_arn=None,  # Will be added in Phase 5
+            sns_topic_arn=self.sns_topic.topic_arn,
             vpc=self.vpc.vpc if self.vpc else None,
             vpc_subnets=self.vpc.private_subnets if self.vpc else None,
             security_group=self.vpc.lambda_security_group if self.vpc else None,
         )
+
+        # Note: DLQs are created and monitored via CloudWatch alarms.
+        # Step Functions handles retries for synchronous Lambda invocations.
+        # DLQs would be used for async invocations (e.g., SNS triggers, EventBridge)
+        # if added in the future.
 
         # Create Step Functions orchestration
         self.orchestration = OrchestrationConstruct(
@@ -100,7 +147,22 @@ class CloudSyncStack(Stack):
             media_authenticator=self.lambdas.media_authenticator,
             media_lister=self.lambdas.media_lister,
             video_downloader=self.lambdas.video_downloader,
-            sns_topic=None,  # Will be added in Phase 5
+            sns_topic=self.sns_topic,
+        )
+
+        # Create monitoring infrastructure (Phase 5)
+        self.monitoring = MonitoringConstruct(
+            self,
+            "Monitoring",
+            sns_topic=self.sns_topic,
+            lambda_functions={
+                "media-authenticator": self.lambdas.media_authenticator,
+                "media-lister": self.lambdas.media_lister,
+                "video-downloader": self.lambdas.video_downloader,
+            },
+            state_machine=self.orchestration.state_machine,
+            dlqs=self.dlqs,
+            environment=environment,
         )
 
         # Stack outputs for observability and operations
@@ -144,4 +206,22 @@ class CloudSyncStack(Stack):
             value=self.storage.archive_bucket.bucket_name,
             description="S3 Archive Bucket",
             export_name=f"{environment}-archive-bucket",
+        )
+
+        CfnOutput(
+            self,
+            "SNSTopicArn",
+            value=self.sns_topic.topic_arn,
+            description="SNS Alert Topic ARN",
+            export_name=f"{environment}-alert-topic-arn",
+        )
+
+        CfnOutput(
+            self,
+            "CloudWatchDashboardUrl",
+            value=(
+                f"https://{self.region}.console.aws.amazon.com/cloudwatch/home"
+                f"?region={self.region}#dashboards:name={environment}-GoPro-Sync-Operations"
+            ),
+            description="CloudWatch Dashboard URL",
         )

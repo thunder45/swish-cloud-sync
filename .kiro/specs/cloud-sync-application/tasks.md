@@ -188,7 +188,7 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
 
 ## Phase 5: Monitoring and Alerting
 
-- [ ] 10. Implement CloudWatch monitoring
+- [x] 10. Implement CloudWatch monitoring
   - Create CloudWatch dashboard with widgets for sync metrics (success rate, transfer volume, throughput, errors)
   - Configure CloudWatch alarms for high failure rate (>3 in 5 min)
   - Configure CloudWatch alarms for authentication failures (>1 in 5 min)
@@ -201,14 +201,14 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Create saved CloudWatch Logs Insights queries (Failed Downloads, Average Throughput, Slow Transfers)
   - _Requirements: 7.4, 7.5_
 
-- [ ] 11. Implement SNS notification topic
+- [x] 11. Implement SNS notification topic
   - Create SNS topic (gopro-sync-alerts)
   - Add email subscription for ops team
   - Configure topic encryption with AWS managed key
   - Add topic access policy for CloudWatch and Step Functions
   - _Requirements: 7.5_
 
-- [ ] 12. Implement Dead Letter Queues
+- [x] 12. Implement Dead Letter Queues
   - Create SQS DLQ for each Lambda function
   - Configure DLQ retention to 14 days
   - Add redrive policy with maxReceiveCount 3
@@ -228,7 +228,7 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Add SNS notification for rotation events
   - _Requirements: 2.2, 2.3_
 
-- [ ]* 13.1 Write unit tests for secrets rotation
+- [ ] 13.1 Write unit tests for secrets rotation
   - Test refresh token renewal
   - Test credential validation
   - Test error handling for rotation failures
