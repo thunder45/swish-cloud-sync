@@ -58,17 +58,17 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Retrieve credentials from Secrets Manager
         credentials = retrieve_credentials()
         
-        # Get pagination state from DynamoDB
-        start_page = get_pagination_state()
+        # Get page number from event (passed by state machine loop)
+        page_number = event.get('page_number', 1)
         
         # Create GoPro provider instance
         provider = GoProProvider()
         
-        # List media from provider with pagination
-        logger.info(f'Listing media from GoPro Cloud (page {start_page})')
-        all_videos = list_media_from_provider(provider, credentials, MAX_VIDEOS, correlation_id, start_page)
+        # List media from provider for this specific page
+        logger.info(f'Listing media from GoPro Cloud (page {page_number})')
+        all_videos = list_media_from_provider(provider, credentials, MAX_VIDEOS, correlation_id, page_number)
         
-        logger.info(f'Found {len(all_videos)} total videos from provider')
+        logger.info(f'Found {len(all_videos)} total videos from provider (page {page_number})')
         
         # Publish metric
         metrics_publisher.put_metric(
@@ -81,17 +81,6 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         new_videos = filter_new_videos(all_videos)
         
         logger.info(f'Found {len(new_videos)} new videos to sync')
-        
-        # Update pagination state if we got a full batch
-        # If we got < MAX_VIDEOS, we've reached the end
-        if len(all_videos) == MAX_VIDEOS:
-            # Advance to next page for next execution
-            update_pagination_state(start_page + 1)
-            logger.info(f'Advanced pagination to page {start_page + 1}')
-        else:
-            # Reset to page 1 (we've processed everything)
-            update_pagination_state(1)
-            logger.info('Reset pagination to page 1 (reached end of library)')
         
         # Calculate duration
         duration = (datetime.utcnow() - start_time).total_seconds()
@@ -216,25 +205,25 @@ def list_media_from_provider(
     credentials: Dict[str, Any],
     max_videos: int,
     correlation_id: str,
-    start_page: int = 1
+    page_number: int = 1
 ) -> List[Dict[str, Any]]:
     """
-    List media from GoPro Cloud with pagination and API structure validation.
+    List media from GoPro Cloud for a single API page.
     
     Args:
         provider: GoPro provider instance
         credentials: Credentials from Secrets Manager
-        max_videos: Maximum number of videos to retrieve
+        max_videos: Maximum number of videos to retrieve (per page)
         correlation_id: Correlation ID for tracking
-        start_page: Starting page number (for pagination across executions)
+        page_number: API page number (1-indexed, 30 items per page)
         
     Returns:
-        List of video metadata dictionaries
+        List of video metadata dictionaries for this page
         
     Raises:
         APIError: If API response structure is unexpected
     """
-    logger.info(f'Listing media from provider (max_videos={max_videos}, start_page={start_page})')
+    logger.info(f'Listing media from provider (page={page_number})')
     
     try:
         # Extract authentication headers from credentials
@@ -242,24 +231,15 @@ def list_media_from_provider(
         user_agent = credentials.get('user-agent', 
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36')
         
-        # GoPro API uses page-based pagination with 30 items per page
-        # Calculate which API pages to fetch based on our start_page
-        # If start_page=1 (videos 1-50), fetch API pages 1-2 (60 videos)
-        # If start_page=2 (videos 51-100), fetch API pages 3-4 (60 videos)
-        items_per_api_page = 30
-        pages_to_fetch = (max_videos + items_per_api_page - 1) // items_per_api_page  # Ceiling division
-        api_start_page = (start_page - 1) * pages_to_fetch + 1
-        
-        logger.info(f'Fetching API pages {api_start_page}-{api_start_page + pages_to_fetch - 1} (30 items/page)')
-        
-        # Call provider's list_media method with correct start page
-        # Provider will paginate from api_start_page
+        # Call provider to get a single page (30 items)
+        # We get 30 from API but return up to MAX_VIDEOS (50)
+        # So we fetch 2 pages to ensure we have enough
         videos = provider.list_media_with_start_page(
             cookies=cookies,
             user_agent=user_agent,
-            start_page=api_start_page,
-            page_size=items_per_api_page,
-            max_results=max_videos
+            start_page=page_number,
+            page_size=30,
+            max_results=MAX_VIDEOS
         )
         
         # Convert VideoMetadata objects to dictionaries
