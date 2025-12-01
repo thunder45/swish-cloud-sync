@@ -215,7 +215,6 @@ class OrchestrationConstruct(Construct):
                 "bytes_transferred.$": "$.Payload.bytes_transferred",
                 "transfer_duration_seconds.$": "$.Payload.transfer_duration_seconds",
                 "throughput_mbps.$": "$.Payload.throughput_mbps",
-                "error.$": "$.Payload.error",
             },
             retry_on_service_exceptions=False,  # Custom retry logic below
         )
