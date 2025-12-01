@@ -213,7 +213,8 @@ class OrchestrationConstruct(Construct):
                 "media_id.$": "$.Payload.media_id",
                 "s3_key.$": "$.Payload.s3_key",
                 "bytes_transferred.$": "$.Payload.bytes_transferred",
-                "transfer_duration.$": "$.Payload.transfer_duration",
+                "transfer_duration_seconds.$": "$.Payload.transfer_duration_seconds",
+                "throughput_mbps.$": "$.Payload.throughput_mbps",
                 "error.$": "$.Payload.error",
             },
             retry_on_service_exceptions=False,  # Custom retry logic below
