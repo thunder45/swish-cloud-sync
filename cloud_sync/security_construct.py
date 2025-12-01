@@ -49,6 +49,9 @@ class SecurityConstruct(Construct):
         Returns:
             IAM Role for Media Authenticator
         """
+        from aws_cdk import Stack
+        stack = Stack.of(self)
+        
         role = iam.Role(
             self,
             "MediaAuthenticatorRole",
@@ -74,7 +77,7 @@ class SecurityConstruct(Construct):
                     "secretsmanager:UpdateSecretValue"
                 ],
                 resources=[
-                    f"arn:aws:secretsmanager:{self.region}:{self.account}:"
+                    f"arn:aws:secretsmanager:{stack.region}:{stack.account}:"
                     f"secret:{COMMON_CONFIG['secrets_name']}-*"
                 ]
             )

@@ -4,6 +4,7 @@ from aws_cdk import (
     aws_dynamodb as dynamodb,
     aws_s3 as s3,
     aws_kms as kms,
+    aws_iam as iam,
     RemovalPolicy,
     Duration,
 )
@@ -85,7 +86,7 @@ class StorageConstruct(Construct):
             S3 Bucket construct
         """
         # Create KMS key for S3 encryption
-        kms_key = kms.Key(
+        self.kms_key = kms.Key(
             self,
             "ArchiveBucketKey",
             description=f"KMS key for Cloud Sync archive bucket - {self.config.name}",
@@ -94,14 +95,17 @@ class StorageConstruct(Construct):
             else RemovalPolicy.DESTROY
         )
 
-        # Create S3 bucket
+        # Create S3 bucket with shortened name to fit 63 char limit
+        # Format: gopro-{env}-{account_id[:8]} (max ~30 chars)
+        from aws_cdk import Stack
+        stack = Stack.of(self)
         bucket = s3.Bucket(
             self,
             "ArchiveBucket",
-            bucket_name=f"gopro-archive-bucket-{self.config.name}-{self.node.addr}",
+            bucket_name=f"gopro-{self.config.name}-{stack.account}",
             versioned=True,
             encryption=s3.BucketEncryption.KMS,
-            encryption_key=kms_key,
+            encryption_key=self.kms_key,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
             removal_policy=RemovalPolicy.RETAIN if self.config.name == 'prod'
@@ -139,10 +143,10 @@ class StorageConstruct(Construct):
 
         # Add bucket policy to deny insecure transport
         bucket.add_to_resource_policy(
-            s3.PolicyStatement(
+            iam.PolicyStatement(
                 sid="DenyInsecureTransport",
-                effect=s3.Effect.DENY,
-                principals=[s3.AnyPrincipal()],
+                effect=iam.Effect.DENY,
+                principals=[iam.AnyPrincipal()],
                 actions=["s3:*"],
                 resources=[
                     bucket.bucket_arn,

@@ -42,7 +42,7 @@ class CloudSyncStack(Stack):
         """
         super().__init__(scope, construct_id, **kwargs)
 
-        self.environment = environment
+        self.env_name = environment
         self.config = get_config(environment)
 
         # Add tags to all resources
@@ -90,10 +90,10 @@ class CloudSyncStack(Stack):
 
         # Create Dead Letter Queues for Lambda functions (Phase 5)
         self.dlqs = {
-            "media-authenticator": sqs.Queue(
+            "token-validator": sqs.Queue(
                 self,
-                "MediaAuthenticatorDLQ",
-                queue_name=f"{environment}-media-authenticator-dlq",
+                "TokenValidatorDLQ",
+                queue_name=f"{environment}-token-validator-dlq",
                 retention_period=Duration.days(14),
             ),
             "media-lister": sqs.Queue(
@@ -145,7 +145,7 @@ class CloudSyncStack(Stack):
         self.orchestration = OrchestrationConstruct(
             self,
             "Orchestration",
-            media_authenticator=self.lambdas.media_authenticator,
+            token_validator=self.lambdas.token_validator,
             media_lister=self.lambdas.media_lister,
             video_downloader=self.lambdas.video_downloader,
             sns_topic=self.sns_topic,
@@ -157,7 +157,7 @@ class CloudSyncStack(Stack):
             "Monitoring",
             sns_topic=self.sns_topic,
             lambda_functions={
-                "media-authenticator": self.lambdas.media_authenticator,
+                "token-validator": self.lambdas.token_validator,
                 "media-lister": self.lambdas.media_lister,
                 "video-downloader": self.lambdas.video_downloader,
             },

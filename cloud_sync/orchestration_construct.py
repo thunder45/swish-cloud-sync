@@ -2,6 +2,7 @@
 Orchestration Construct
 
 Creates and configures the Step Functions state machine for workflow orchestration.
+Updated for cookie-based authentication with token-validator Lambda.
 """
 
 from aws_cdk import (
@@ -27,7 +28,7 @@ class OrchestrationConstruct(Construct):
         scope: Construct,
         id: str,
         *,
-        media_authenticator: lambda_.Function,
+        token_validator: lambda_.Function,
         media_lister: lambda_.Function,
         video_downloader: lambda_.Function,
         sns_topic: Optional[sns.ITopic] = None,
@@ -35,7 +36,7 @@ class OrchestrationConstruct(Construct):
     ) -> None:
         super().__init__(scope, id, **kwargs)
 
-        self.media_authenticator = media_authenticator
+        self.token_validator = token_validator
         self.media_lister = media_lister
         self.video_downloader = video_downloader
         self.sns_topic = sns_topic
@@ -58,7 +59,7 @@ class OrchestrationConstruct(Construct):
         )
 
         # Grant Lambda invoke permissions
-        self.media_authenticator.grant_invoke(execution_role)
+        self.token_validator.grant_invoke(execution_role)
         self.media_lister.grant_invoke(execution_role)
         self.video_downloader.grant_invoke(execution_role)
 
@@ -95,32 +96,61 @@ class OrchestrationConstruct(Construct):
             )
         )
 
-        # Define Lambda invocation tasks
-        authenticate_task = tasks.LambdaInvoke(
+        # ===== STATE DEFINITIONS =====
+        
+        # Generate correlation ID at start of execution
+        generate_correlation_id = sfn.Pass(
             self,
-            "AuthenticateProvider",
-            lambda_function=self.media_authenticator,
+            "GenerateCorrelationId",
+            parameters={
+                "correlation_id.$": "$$.Execution.Name",
+                "execution_id.$": "$$.Execution.Id",
+                "start_time.$": "$$.Execution.StartTime",
+                "provider": "gopro",
+            },
+            result_path="$.context",
+        )
+
+        # Validate tokens (checks cookie validity)
+        validate_tokens_task = tasks.LambdaInvoke(
+            self,
+            "ValidateTokens",
+            lambda_function=self.token_validator,
             payload=sfn.TaskInput.from_object(
-                {"provider": "gopro", "action": "authenticate"}
+                {
+                    "correlation_id.$": "$.context.correlation_id",
+                }
             ),
-            result_path="$.auth",
+            result_path="$.validation",
             result_selector={
                 "statusCode.$": "$.Payload.statusCode",
-                "auth_token.$": "$.Payload.auth_token",
-                "user_id.$": "$.Payload.user_id",
-                "expires_at.$": "$.Payload.expires_at",
+                "valid.$": "$.Payload.valid",
+                "cookie_age_days.$": "$.Payload.cookie_age_days",
+                "validation_method.$": "$.Payload.validation_method",
+                "duration_seconds.$": "$.Payload.duration_seconds",
             },
             retry_on_service_exceptions=True,
         )
 
-        # Add retry configuration for authentication
-        authenticate_task.add_retry(
+        # Add retry configuration for token validation
+        validate_tokens_task.add_retry(
             errors=["Lambda.ServiceException", "Lambda.TooManyRequestsException"],
             interval=Duration.seconds(2),
             max_attempts=3,
             backoff_rate=2.0,
         )
 
+        # Check if tokens are valid
+        check_token_validity = sfn.Choice(self, "CheckTokenValidity")
+
+        tokens_invalid = sfn.Fail(
+            self,
+            "TokensInvalid",
+            error="TokenValidationFailed",
+            cause="Cookies are invalid or expired. Manual refresh required.",
+        )
+
+        # List media from GoPro (no auth parameters needed - Lambda gets from Secrets Manager)
         list_media_task = tasks.LambdaInvoke(
             self,
             "ListMedia",
@@ -128,14 +158,13 @@ class OrchestrationConstruct(Construct):
             payload=sfn.TaskInput.from_object(
                 {
                     "provider": "gopro",
-                    "auth_token": sfn.JsonPath.string_at("$.auth.auth_token"),
-                    "user_id": sfn.JsonPath.string_at("$.auth.user_id"),
-                    "max_videos": 1000,
+                    "correlation_id.$": "$.context.correlation_id",
                 }
             ),
             result_path="$.media",
             result_selector={
                 "statusCode.$": "$.Payload.statusCode",
+                "provider.$": "$.Payload.provider",
                 "new_videos.$": "$.Payload.new_videos",
                 "total_found.$": "$.Payload.total_found",
                 "new_count.$": "$.Payload.new_count",
@@ -152,8 +181,17 @@ class OrchestrationConstruct(Construct):
             backoff_rate=2.0,
         )
 
+        # Check if there are new videos to download
+        check_new_videos = sfn.Choice(self, "CheckNewVideos")
+
+        no_new_videos = sfn.Succeed(
+            self,
+            "NoNewVideos",
+            comment="No new videos to sync - execution completed successfully",
+        )
+
         # Download video task (used in Map state)
-        # FIX: Use $.video and $.auth from Map parameters
+        # Lambda gets credentials from Secrets Manager, no auth parameters needed
         download_video_task = tasks.LambdaInvoke(
             self,
             "DownloadVideo",
@@ -166,7 +204,8 @@ class OrchestrationConstruct(Construct):
                     "download_url": sfn.JsonPath.string_at("$.video.download_url"),
                     "file_size": sfn.JsonPath.number_at("$.video.file_size"),
                     "upload_date": sfn.JsonPath.string_at("$.video.upload_date"),
-                    "auth_token": sfn.JsonPath.string_at("$.auth.auth_token"),
+                    "duration": sfn.JsonPath.number_at("$.video.duration"),
+                    "correlation_id.$": "$.correlation_id",
                 }
             ),
             result_selector={
@@ -174,6 +213,7 @@ class OrchestrationConstruct(Construct):
                 "media_id.$": "$.Payload.media_id",
                 "s3_key.$": "$.Payload.s3_key",
                 "bytes_transferred.$": "$.Payload.bytes_transferred",
+                "transfer_duration.$": "$.Payload.transfer_duration",
                 "error.$": "$.Payload.error",
             },
             retry_on_service_exceptions=False,  # Custom retry logic below
@@ -192,28 +232,36 @@ class OrchestrationConstruct(Construct):
         mark_video_failed = sfn.Pass(
             self,
             "MarkVideoFailed",
-            result_path="$.download_result",
-            parameters={"status": "FAILED", "error.$": "$.error"},
+            parameters={
+                "status": "FAILED",
+                "media_id.$": "$.media_id",
+                "error.$": "$.error",
+            },
         )
 
         # Mark video as complete
         mark_video_complete = sfn.Pass(
             self,
             "VideoComplete",
-            result_path="$.download_result",
-            parameters={"status": "COMPLETED"},
+            parameters={
+                "status": "COMPLETED",
+                "media_id.$": "$.media_id",
+                "s3_key.$": "$.s3_key",
+                "bytes_transferred.$": "$.bytes_transferred",
+            },
         )
 
         # Add catch for download errors
         download_video_task.add_catch(
-            mark_video_failed, errors=["States.ALL"], result_path="$.error"
+            mark_video_failed,
+            errors=["States.ALL"],
+            result_path="$.error",
         )
 
         # Chain download task to completion
         download_video_task.next(mark_video_complete)
 
-        # Map state for parallel downloads
-        # FIX: Pass auth context to iterator
+        # Map state for parallel downloads (max 5 concurrent)
         download_videos_map = sfn.Map(
             self,
             "DownloadVideos",
@@ -222,36 +270,40 @@ class OrchestrationConstruct(Construct):
             result_path="$.download_results",
             parameters={
                 "video.$": "$$.Map.Item.Value",
-                "auth.$": "$.auth",
+                "correlation_id.$": "$.context.correlation_id",
             },
         )
         download_videos_map.iterator(download_video_task)
 
-        # Check if there are new videos
-        check_new_videos = sfn.Choice(self, "CheckNewVideos")
-
-        no_new_videos = sfn.Succeed(
-            self, "NoNewVideos", comment="No new videos to sync"
-        )
-
-        # Generate summary
+        # Generate summary of execution
         generate_summary = sfn.Pass(
             self,
             "GenerateSummary",
             parameters={
-                "execution_id": sfn.JsonPath.string_at("$$.Execution.Id"),
-                "total_videos": sfn.JsonPath.number_at("$.media.new_count"),
-                "start_time": sfn.JsonPath.string_at("$$.Execution.StartTime"),
-                "download_results": sfn.JsonPath.string_at("$.download_results"),
+                "execution_id.$": "$.context.execution_id",
+                "correlation_id.$": "$.context.correlation_id",
+                "start_time.$": "$.context.start_time",
+                "total_videos.$": "$.media.new_count",
+                "total_found.$": "$.media.total_found",
+                "already_synced.$": "$.media.already_synced",
+                "download_results.$": "$.download_results",
+                "cookie_age_days.$": "$.validation.cookie_age_days",
             },
             result_path="$.summary",
         )
 
-        # Check for failures - simplified approach
-        # Individual failures are logged in CloudWatch, we just complete successfully
+        # Check for failures in download results
         check_for_failures = sfn.Choice(self, "CheckForFailures")
 
-        sync_complete = sfn.Succeed(self, "SyncComplete")
+        # Calculate if there were any failures (statusCode != 200)
+        # Note: This is a simplified check - individual failures are logged in CloudWatch
+        has_failures_condition = sfn.Condition.is_present("$.download_results[?(@.statusCode != 200)]")
+
+        sync_complete = sfn.Succeed(
+            self,
+            "SyncComplete",
+            comment="Sync completed successfully",
+        )
 
         # Notify partial failure (if SNS topic is configured)
         if self.sns_topic:
@@ -262,13 +314,12 @@ class OrchestrationConstruct(Construct):
                 subject="GoPro Sync Partial Failure",
                 message=sfn.TaskInput.from_object(
                     {
-                        "execution_id": sfn.JsonPath.string_at(
-                            "$.summary.execution_id"
-                        ),
-                        "total_videos": sfn.JsonPath.number_at(
-                            "$.summary.total_videos"
-                        ),
+                        "execution_id": sfn.JsonPath.string_at("$.summary.execution_id"),
+                        "correlation_id": sfn.JsonPath.string_at("$.summary.correlation_id"),
+                        "total_videos": sfn.JsonPath.number_at("$.summary.total_videos"),
+                        "start_time": sfn.JsonPath.string_at("$.summary.start_time"),
                         "message": "Sync completed with failures. Check CloudWatch Logs for details.",
+                        "cookie_age_days": sfn.JsonPath.number_at("$.summary.cookie_age_days"),
                     }
                 ),
             )
@@ -281,8 +332,10 @@ class OrchestrationConstruct(Construct):
                 subject="GoPro Sync Critical Failure",
                 message=sfn.TaskInput.from_object(
                     {
-                        "execution_id": sfn.JsonPath.string_at("$$.Execution.Id"),
-                        "error": sfn.JsonPath.string_at("$.error.Cause"),
+                        "execution_id": sfn.JsonPath.string_at("$.context.execution_id"),
+                        "correlation_id": sfn.JsonPath.string_at("$.context.correlation_id"),
+                        "error_cause": sfn.JsonPath.string_at("$.error.Cause"),
+                        "error_details": sfn.JsonPath.string_at("$.error.Error"),
                         "message": "Critical failure in sync execution. Manual intervention required.",
                     }
                 ),
@@ -297,19 +350,25 @@ class OrchestrationConstruct(Construct):
             notify_critical_failure.next(sync_failed)
 
             # Add catch blocks for critical failures
-            authenticate_task.add_catch(
-                notify_critical_failure, errors=["States.ALL"], result_path="$.error"
+            validate_tokens_task.add_catch(
+                notify_critical_failure,
+                errors=["States.ALL"],
+                result_path="$.error",
             )
             list_media_task.add_catch(
-                notify_critical_failure, errors=["States.ALL"], result_path="$.error"
+                notify_critical_failure,
+                errors=["States.ALL"],
+                result_path="$.error",
             )
 
-            # FIX: Simplified failure detection - just always succeed after downloads
-            # Individual failures are logged and can be retried on next execution
-            check_for_failures_definition = check_for_failures.otherwise(sync_complete)
+            # For failures after downloads, notify but still complete
+            check_for_failures_definition = (
+                check_for_failures
+                .when(has_failures_condition, notify_partial_failure)
+                .otherwise(sync_complete)
+            )
         else:
             # If no SNS topic, just succeed or fail
-            notify_partial_failure = sync_complete
             sync_failed = sfn.Fail(
                 self,
                 "SyncFailed",
@@ -317,11 +376,15 @@ class OrchestrationConstruct(Construct):
                 cause="Critical failure during sync execution",
             )
 
-            authenticate_task.add_catch(
-                sync_failed, errors=["States.ALL"], result_path="$.error"
+            validate_tokens_task.add_catch(
+                sync_failed,
+                errors=["States.ALL"],
+                result_path="$.error",
             )
             list_media_task.add_catch(
-                sync_failed, errors=["States.ALL"], result_path="$.error"
+                sync_failed,
+                errors=["States.ALL"],
+                result_path="$.error",
             )
 
             # Simplified - always succeed after downloads
@@ -329,14 +392,24 @@ class OrchestrationConstruct(Construct):
 
         # Build the state machine flow
         definition = (
-            authenticate_task.next(list_media_task)
+            generate_correlation_id
+            .next(validate_tokens_task)
             .next(
-                check_new_videos.when(
-                    sfn.Condition.number_greater_than("$.media.new_count", 0),
-                    download_videos_map.next(generate_summary).next(
-                        check_for_failures_definition
+                check_token_validity
+                .when(
+                    sfn.Condition.boolean_equals("$.validation.valid", True),
+                    list_media_task.next(
+                        check_new_videos
+                        .when(
+                            sfn.Condition.number_greater_than("$.media.new_count", 0),
+                            download_videos_map
+                            .next(generate_summary)
+                            .next(check_for_failures_definition),
+                        )
+                        .otherwise(no_new_videos)
                     ),
-                ).otherwise(no_new_videos)
+                )
+                .otherwise(tokens_invalid)
             )
         )
 
@@ -356,7 +429,7 @@ class OrchestrationConstruct(Construct):
             definition_body=sfn.DefinitionBody.from_chainable(definition),
             timeout=Duration.hours(12),
             tracing_enabled=True,
-            role=execution_role,  # Explicit role
+            role=execution_role,
             logs=sfn.LogOptions(
                 destination=log_group,
                 level=sfn.LogLevel.ALL,
@@ -389,16 +462,11 @@ class OrchestrationConstruct(Construct):
         )
 
         # Add state machine as target
+        # Empty input - Lambdas get credentials from Secrets Manager
         rule.add_target(
             targets.SfnStateMachine(
                 self.state_machine,
-                input=events.RuleTargetInput.from_object(
-                    {
-                        "provider": "gopro",
-                        "scheduled": True,
-                        "trigger_time": events.EventField.time,
-                    }
-                ),
+                input=events.RuleTargetInput.from_object({}),
             )
         )
 
