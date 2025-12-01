@@ -46,21 +46,29 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Create IAM role for Step Functions orchestrator
   - _Requirements: 9.1, 9.2, 9.5, 9.6_
 
-- [x] 3.1 Set up GoPro OAuth 2.0 application
-  - Register application in GoPro Developer Portal
-  - Obtain client_id and client_secret
-  - Configure OAuth redirect URIs
-  - Store client credentials in environment variables or Parameter Store
-  - _Requirements: 2.2, 2.3_
+- [x] 3.1 Create token extraction documentation
+  - Write TOKEN_EXTRACTION_GUIDE.md with step-by-step instructions
+  - Include screenshots for Chrome and Firefox browsers
+  - Document expected token formats and validation
+  - Add troubleshooting section for common issues
+  - _Requirements: 11.1, 11.2_
 
-- [x] 3.2 Create initial secrets in Secrets Manager
-  - Manually perform initial OAuth flow to get refresh_token
-  - Create Secrets Manager secret (gopro/credentials) with initial credentials
-  - Store refresh_token, access_token, user_id, and timestamp
+- [x] 3.2 Create token management scripts
+  - Write token update script (scripts/update_gopro_tokens.sh)
+  - Implement token validation with test API call
+  - Add user-friendly prompts and error messages
+  - Include success/failure reporting
+  - _Requirements: 11.4, 11.9_
+
+- [ ] 3.3 Create initial secrets in Secrets Manager
+  - Manually extract tokens from browser following TOKEN_EXTRACTION_GUIDE.md
+  - Create Secrets Manager secret (gopro/credentials) with extracted tokens
+  - Store gp-access-token, cookies, user-agent, and last_updated timestamp
   - Verify secret encryption is enabled
-  - _Requirements: 2.1, 2.2_
+  - Test tokens with validation script
+  - _Requirements: 2.1, 11.7_
 
-- [x] 3.3 Implement VPC infrastructure (Optional for dev, Required for prod)
+- [x] 3.4 Implement VPC infrastructure (Optional for dev, Required for prod)
   - Create VPC with public and private subnets across 2 availability zones
   - Configure NAT Gateway in public subnet for outbound internet access
   - Create VPC Gateway Endpoints (S3, DynamoDB)
@@ -75,60 +83,72 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
 
 - [x] 4. Implement GoPro provider class
   - Create GoProProvider class implementing CloudProviderInterface
-  - Implement OAuth 2.0 authentication with refresh token flow
+  - Implement cookie-based authentication with header extraction
+  - Implement token validation via test API call
   - Implement media listing with pagination (100 items per page)
   - Implement download URL retrieval
   - Add error handling for API rate limits (429) with exponential backoff
+  - Add API response structure validation
   - Register GoProProvider in ProviderFactory._providers dictionary
   - Verify factory can instantiate GoPro provider by name
-  - _Requirements: 1.1, 1.2, 2.2, 2.3, 11.3_
+  - _Requirements: 1.1, 1.2, 2.2, 11.3, 12.1_
 
 - [x] 4.1 Write unit tests for GoPro provider
-  - Test OAuth 2.0 authentication flow
-  - Test token refresh logic
+  - Test cookie-based authentication
+  - Test token validation logic
   - Test media listing pagination
   - Test error handling for rate limits
-  - _Requirements: 2.2, 2.3_
+  - Test API response structure validation
+  - _Requirements: 2.2, 2.3, 12.1_
 
 ---
 
 ## Phase 3: Lambda Functions
 
-- [x] 5. Implement Media Authenticator Lambda
+- [ ] 5. Implement Token Validator Lambda
   - Create Lambda handler function
   - Configure Lambda with 256 MB memory, 30 second timeout
-  - Integrate with Secrets Manager to retrieve credentials
-  - Implement token expiration check (24-hour threshold)
-  - Call GoPro provider authenticate method
-  - Update Secrets Manager with new tokens
+  - Integrate with Secrets Manager to retrieve stored tokens (read-only)
+  - Implement token validation with test API call to GoPro Cloud
+  - Detect token expiration via 401/403 responses
+  - Publish SNS alert when tokens expire with refresh instructions
+  - Add optional proactive expiration detection based on token age
   - Add structured logging with correlation IDs
   - Configure X-Ray tracing with subsegments
   - Deploy Lambda in VPC private subnet (if VPC enabled)
-  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 7.6_
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 7.6, 11.5, 11.6_
 
-- [x] 5.1 Write unit tests for Media Authenticator
-  - Test token expiration logic
-  - Test Secrets Manager integration
-  - Test error handling for authentication failures
-  - _Requirements: 2.2, 2.3, 2.5_
+- [ ] 5.1 Write unit tests for Token Validator
+  - Test token validation logic with mock API responses
+  - Test 401/403 expiration detection
+  - Test SNS alert publishing
+  - Test Secrets Manager integration (read-only)
+  - Test error handling for validation failures
+  - Test proactive expiration detection based on token age (if implemented)
+  - _Requirements: 2.2, 2.3, 2.5, 11.5_
 
-- [x] 6. Implement Media Lister Lambda
+- [ ] 6. Implement Media Lister Lambda
   - Create Lambda handler function
   - Configure Lambda with 512 MB memory, 5 minute timeout
-  - Call GoPro provider list_media method
+  - Call GoPro provider list_media method using unofficial API endpoints
+  - Implement API response structure validation before processing
+  - Publish alert when API response structure differs from expected format
+  - Log complete API response when validation fails
   - Implement DynamoDB batch query to check sync status
   - Filter videos where status != COMPLETED or no record exists
   - Return list of new videos with metadata
   - Add structured logging with correlation IDs
   - Configure X-Ray tracing with subsegments
   - Deploy Lambda in VPC private subnet (if VPC enabled)
-  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 4.2, 7.6_
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 4.2, 7.6, 12.1, 12.2, 12.3_
 
-- [x] 6.1 Write unit tests for Media Lister
+- [ ] 6.1 Write unit tests for Media Lister
   - Test media filtering logic
   - Test DynamoDB batch query
   - Test pagination handling
-  - _Requirements: 1.4, 1.5, 4.2_
+  - Test API response structure validation
+  - Test alert publishing for unexpected API responses
+  - _Requirements: 1.4, 1.5, 4.2, 12.1, 12.2_
 
 - [x] 7. Implement Video Downloader Lambda
   - Create Lambda handler function
@@ -161,9 +181,9 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
 
 ## Phase 4: Workflow Orchestration
 
-- [x] 8. Implement Step Functions state machine
+- [ ] 8. Implement Step Functions state machine
   - Create state machine definition in CDK
-  - Add AuthenticateProvider state with retry configuration
+  - Add ValidateTokens state (renamed from AuthenticateProvider) with retry configuration
   - Add ListMedia state with retry configuration
   - Add CheckNewVideos choice state
   - Add DownloadVideos Map state with max concurrency 5
@@ -171,7 +191,7 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Add GenerateSummary state to count successes and failures
   - Add CheckForFailures choice state
   - Add NotifyPartialFailure state with SNS integration
-  - Add NotifyCriticalFailure state with SNS integration
+  - Add NotifyCriticalFailure state with SNS integration for token expiration
   - Configure state machine timeout to 43200 seconds (12 hours)
   - Add continuation pattern for libraries >500 videos (batch processing with continuation_token)
   - Add error handling with catch blocks for all states
@@ -188,18 +208,20 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
 
 ## Phase 5: Monitoring and Alerting
 
-- [x] 10. Implement CloudWatch monitoring
+- [ ] 10. Implement CloudWatch monitoring
   - Create CloudWatch dashboard with widgets for sync metrics (success rate, transfer volume, throughput, errors)
   - Configure CloudWatch alarms for high failure rate (>3 in 5 min)
-  - Configure CloudWatch alarms for authentication failures (>1 in 5 min)
+  - Configure CloudWatch alarms for token expiration (>0 in 5 min)
+  - Configure CloudWatch alarms for token validation failures (>1 in 5 min)
+  - Configure CloudWatch alarms for API structure validation failures (>3 in 15 min)
   - Configure CloudWatch alarms for Lambda errors (>5 in 5 min)
   - Configure CloudWatch alarms for Lambda throttles (>1 in 5 min)
   - Configure CloudWatch alarms for Step Functions failures (>1 in 5 min)
   - Configure CloudWatch alarms for DLQ depth (>0)
   - Configure CloudWatch alarms for low throughput (<20 Mbps for 15 min)
   - Set log retention to 30 days for operational logs
-  - Create saved CloudWatch Logs Insights queries (Failed Downloads, Average Throughput, Slow Transfers)
-  - _Requirements: 7.4, 7.5_
+  - Create saved CloudWatch Logs Insights queries (Failed Downloads, Average Throughput, Slow Transfers, Token Expiration Events)
+  - _Requirements: 7.4, 7.5, 12.4_
 
 - [x] 11. Implement SNS notification topic
   - Create SNS topic (gopro-sync-alerts)
@@ -217,35 +239,71 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
 
 ---
 
-## Phase 6: Secrets Rotation
+## Phase 6: Token Health Monitoring and Management
 
-- [ ] 13. Implement automatic secrets rotation
-  - Create Lambda function for secrets rotation
-  - Implement refresh token renewal logic
-  - Add credential testing before completing rotation
-  - Configure EventBridge rule for 30-day rotation schedule
-  - Add CloudWatch metrics for rotation success/failure
-  - Add SNS notification for rotation events
-  - _Requirements: 2.2, 2.3_
+**Note**: This phase replaces the original "Secrets Rotation" design. Since automatic token refresh is not possible with unofficial APIs, this phase focuses on monitoring token health and facilitating manual refresh processes.
 
-- [ ] 13.1 Write unit tests for secrets rotation
-  - Test refresh token renewal
-  - Test credential validation
-  - Test error handling for rotation failures
-  - _Requirements: 2.2, 2.3_
+- [ ] 13. Implement token health monitoring
+  - Add token age tracking in CloudWatch metrics
+  - Create CloudWatch dashboard widget for token age
+  - Configure optional reminder EventBridge rule (every 14 days) to proactively check tokens
+  - Add SNS notification template for token refresh reminders
+  - Document token lifespan patterns as they're observed
+  - _Requirements: 11.5, 11.6_
+
+- [ ] 13.1 Create token extraction tooling (Optional - Browser Extension)
+  - Design browser extension architecture (Chrome/Firefox compatible)
+  - Implement automatic header extraction from authenticated sessions
+  - Add one-click copy function with formatted output
+  - Include visual confirmation of successful extraction
+  - Add error handling for unauthenticated sessions
+  - Publish extension to Chrome Web Store and Firefox Add-ons (optional)
+  - _Requirements: 11.2, 11.3_
+
+- [ ] 13.2 Document token management procedures
+  - Create operational runbook for token refresh process
+  - Document expected token lifespan based on observations
+  - Add troubleshooting guide for token-related issues
+  - Create quick reference card for token extraction
+  - Document escalation procedures if tokens expire during critical operations
+  - _Requirements: 11.1, 11.8_
+
+- [ ] 13.3 Implement API change detection monitoring
+  - Create Lambda function for periodic API health checks
+  - Validate known endpoint responses match expected structure
+  - Track API response time metrics
+  - Alert on unexpected changes
+  - Document API behavior patterns
+  - _Requirements: 12.1, 12.2, 12.3, 12.4_
 
 ---
 
 ## Phase 7: Deployment and Configuration
 
-- [ ] 14. Implement CDK deployment configuration
+- [ ] 14. Create reality-based documentation
+  - Create GOPRO_REALITY_CHECK.md documenting unofficial API situation
+  - Update/replace GOPRO_OAUTH_SETUP.md with redirect to correct docs
+  - Document all known unofficial API endpoints
+  - Add legal disclaimer about Terms of Service
+  - Document risks and mitigation strategies
+  - _Requirements: 11.8_
+
+- [ ] 14.1 Implement CDK deployment configuration
   - Create environment-specific configuration (dev, staging, prod)
   - Implement CDK context parameters for environment selection
   - Add CDK synthesis and deployment scripts
   - Configure Lambda function environment variables
   - Attach Lambda Layer to all Lambda functions
   - Enable X-Ray tracing for all Lambda functions and Step Functions
+  - Update IAM roles to reflect Token Validator (read-only Secrets Manager access)
   - _Requirements: All_
+
+- [ ] 14.2 Clean up obsolete documentation
+  - Verify docs/GOPRO_OAUTH_SETUP.md is replaced with redirect
+  - Remove OAuth references from README.md (if any)
+  - Update any remaining OAuth references in code comments
+  - Search codebase for "OAuth", "refresh_token", "client_id" and update
+  - _Requirements: 11.8_
 
 - [ ] 15. Create deployment pipeline
   - Set up CI/CD pipeline (GitHub Actions or AWS CodePipeline)
@@ -256,7 +314,7 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Add deployment steps for dev, staging, prod with manual approvals
   - _Requirements: All_
 
-- [ ]* 15.1 Create smoke tests for each environment
+- [ ] 15.1 Create smoke tests for each environment
   - Test authentication succeeds with test credentials
   - Test can list media (with test account)
   - Test Step Functions can be triggered manually
@@ -307,13 +365,16 @@ This implementation plan breaks down the Cloud Sync Application into discrete, a
   - Write deployment guide with step-by-step instructions
   - Document manual intervention procedures for DLQ messages
   - Create troubleshooting guide for common issues
-  - Document secrets rotation process
+  - Document manual token refresh process
   - Create incident response runbook with common scenarios:
-    - Authentication failure remediation
+    - Token expiration remediation
+    - API structure change detection and response
     - DLQ message processing
     - Failed video retry procedures
-    - Secrets rotation failure recovery
     - High failure rate investigation
+    - Unofficial API endpoint changes
+  - Add section on monitoring for API changes
+  - Document community resources for API updates
   - _Requirements: All_
 
 - [ ]* 18.1 Validate cost estimates

@@ -2,9 +2,11 @@
 
 ## Introduction
 
-The Cloud Sync Application is an automated, serverless system that synchronizes video content from cloud storage providers (starting with GoPro Cloud) to AWS S3 cost-optimized storage tiers. The system operates without manual intervention, automatically discovering new content, transferring it securely, and managing storage lifecycle to minimize costs while ensuring data durability and integrity.
+The Cloud Sync Application is an automated, serverless system that synchronizes video content from cloud storage providers (starting with GoPro Cloud) to AWS S3 cost-optimized storage tiers. The system operates with minimal manual intervention, automatically discovering new content, transferring it securely, and managing storage lifecycle to minimize costs while ensuring data durability and integrity.
 
 The initial implementation focuses on GoPro Cloud as the source and AWS S3 with Glacier Deep Archive as the destination. The architecture is designed to be extensible for future cloud providers (e.g., Google Drive, Dropbox).
+
+**Important Note on GoPro Cloud API**: GoPro does not provide an official, documented API for programmatic access to GoPro Cloud. This implementation uses reverse-engineered, unofficial API endpoints that may change without notice. Authentication requires manual extraction of tokens from browser sessions, and automatic token refresh is not possible. This approach carries inherent risks including potential service disruption if GoPro modifies their API structure.
 
 ## Glossary
 
@@ -14,7 +16,8 @@ The initial implementation focuses on GoPro Cloud as the source and AWS S3 with 
 - **S3 Glacier Deep Archive**: AWS S3 storage class optimized for long-term archival with lowest cost ($0.00099/GB/month)
 - **Sync Tracker**: DynamoDB table that maintains the state of each video transfer to prevent duplicates
 - **Orchestrator**: AWS Step Functions state machine that coordinates the multi-step sync workflow
-- **Media Authenticator**: Lambda function responsible for authenticating with cloud provider APIs
+- **Token Validator**: Lambda function responsible for validating stored authentication tokens
+- **Token Extraction Tool**: Browser extension or script that facilitates extracting authentication headers from authenticated browser sessions
 - **Media Lister**: Lambda function that queries cloud provider APIs to discover available videos
 - **Video Downloader**: Lambda function that streams videos from cloud provider to S3
 - **Sync Status**: Enumerated state of a video transfer (PENDING, IN_PROGRESS, COMPLETED, FAILED)
@@ -39,21 +42,21 @@ The initial implementation focuses on GoPro Cloud as the source and AWS S3 with 
 
 5. THE Media Lister SHALL filter the video list to include only videos where the Sync Tracker contains no record OR the Sync Status equals FAILED.
 
-### Requirement 2: Secure Authentication Management
+### Requirement 2: Secure Token Management
 
-**User Story:** As a system administrator, I want cloud provider credentials to be stored securely and refreshed automatically, so that the system maintains access without exposing sensitive information.
+**User Story:** As a system administrator, I want cloud provider authentication tokens to be stored securely and validated before use, so that the system maintains access without exposing sensitive information.
 
 #### Acceptance Criteria
 
-1. THE Media Authenticator SHALL retrieve GoPro Cloud credentials from AWS Secrets Manager using the secret identifier "gopro/credentials".
+1. THE Token Validator SHALL retrieve GoPro Cloud authentication tokens from AWS Secrets Manager using the secret identifier "gopro/credentials".
 
-2. WHEN the stored authentication token has an expiration timestamp less than 24 hours from the current time, THE Media Authenticator SHALL request a new token from the GoPro Cloud API.
+2. THE Token Validator SHALL make a test API call to GoPro Cloud to verify the stored tokens are still valid.
 
-3. THE Media Authenticator SHALL store the new authentication token in AWS Secrets Manager with the current timestamp.
+3. WHEN the token validation test call returns HTTP status code 401 or 403, THE Token Validator SHALL publish an alert notification to the SNS alert topic indicating manual token refresh is required.
 
-4. THE Media Authenticator SHALL return authentication headers containing the valid token for use by downstream components.
+4. THE Token Validator SHALL return authentication headers containing the valid tokens for use by downstream components.
 
-5. IF authentication fails after 3 retry attempts with exponential backoff, THEN THE Media Authenticator SHALL publish a failure notification to the alert topic.
+5. IF token validation fails after 3 retry attempts with exponential backoff, THEN THE Token Validator SHALL publish a failure notification to the alert topic and terminate the workflow.
 
 ### Requirement 3: Reliable Video Transfer
 
@@ -111,13 +114,13 @@ The initial implementation focuses on GoPro Cloud as the source and AWS S3 with 
 
 1. THE Orchestrator SHALL execute the complete sync workflow daily at 2:00 AM Central European Time.
 
-2. THE Orchestrator SHALL invoke the Media Authenticator, then the Media Lister, then the Video Downloader for each new video in sequence.
+2. THE Orchestrator SHALL first invoke the Token Validator to verify authentication, then invoke the Media Lister to discover videos, then invoke the Video Downloader for each new video in parallel subject to concurrency limits.
 
 3. THE Orchestrator SHALL process up to 5 video downloads concurrently using parallel execution.
 
 4. WHEN a component invocation fails with a transient error, THE Orchestrator SHALL retry the invocation up to 3 times with exponential backoff starting at 2 seconds.
 
-5. IF the Media Authenticator or Media Lister fails after all retries, THEN THE Orchestrator SHALL terminate the workflow and publish a critical failure notification.
+5. IF the Token Validator or Media Lister fails after all retries, THEN THE Orchestrator SHALL terminate the workflow and publish a critical failure notification.
 
 6. IF one or more Video Downloader invocations fail while others succeed, THEN THE Orchestrator SHALL complete the workflow and publish a partial failure notification with the failure count.
 
@@ -137,7 +140,7 @@ The initial implementation focuses on GoPro Cloud as the source and AWS S3 with 
 
 5. WHEN a CloudWatch alarm enters the ALARM state, THE Cloud Sync Application SHALL publish a notification to the SNS topic "gopro-sync-alerts".
 
-6. THE Media Authenticator, Media Lister, and Video Downloader SHALL write structured JSON logs to CloudWatch Logs with fields: timestamp, log level, correlation identifier, function name, event type, and relevant metadata.
+6. THE Token Validator, Media Lister, and Video Downloader SHALL write structured JSON logs to CloudWatch Logs with fields: timestamp, log level, correlation identifier, function name, event type, and relevant metadata.
 
 ### Requirement 8: Error Recovery
 
@@ -169,7 +172,7 @@ The initial implementation focuses on GoPro Cloud as the source and AWS S3 with 
 
 4. THE Cloud Sync Application SHALL enable S3 bucket versioning to protect against accidental deletion.
 
-5. THE Media Authenticator SHALL be granted IAM permissions only for "secretsmanager:GetSecretValue" and "secretsmanager:UpdateSecretValue" actions on the "gopro/credentials" secret resource.
+5. THE Token Validator SHALL be granted IAM permissions only for "secretsmanager:GetSecretValue" action on the "gopro/credentials" secret resource.
 
 6. THE Video Downloader SHALL be granted IAM permissions only for "s3:PutObject", "s3:PutObjectTagging", and "s3:AbortMultipartUpload" actions on the "gopro-videos/*" prefix resource.
 
@@ -189,7 +192,45 @@ The initial implementation focuses on GoPro Cloud as the source and AWS S3 with 
 
 5. THE Cloud Sync Application SHALL configure the Video Downloader with a memory allocation of 512 megabytes and timeout of 15 minutes.
 
-### Requirement 11: Extensibility for Multiple Cloud Providers
+### Requirement 11: Manual Token Management
+
+**User Story:** As a system administrator, I want clear guidance on extracting and updating authentication tokens, so that I can maintain system access when tokens expire.
+
+#### Acceptance Criteria
+
+1. THE Cloud Sync Application SHALL provide documentation with step-by-step instructions for extracting authentication tokens from browser sessions, including screenshots and guidance for at least Chrome and Firefox browsers.
+
+2. THE Cloud Sync Application SHALL provide tooling to facilitate extraction of required authentication cookies (gp_access_token JWT, gp_user_id) from authenticated GoPro Plus sessions, which MAY be implemented as a browser extension, command-line tool, or documented manual process.
+
+3. THE token extraction tooling SHALL export extracted tokens in a format compatible with the token update script.
+
+4. THE Cloud Sync Application SHALL provide a script to update authentication tokens in AWS Secrets Manager with extracted values.
+
+5. THE Token Validator SHALL detect token expiration by monitoring for HTTP 401 or 403 responses from the GoPro Cloud API, and MAY also detect imminent expiration based on stored token age if token lifespan patterns are identified.
+
+6. WHEN token expiration is detected, THE Cloud Sync Application SHALL publish an SNS notification with instructions for manual token refresh.
+
+7. THE Cloud Sync Application SHALL store authentication data in AWS Secrets Manager including at minimum: gp_access_token (JWT), gp_user_id (numeric), user-agent, and last_updated timestamp, with additional headers included as needed for successful API authentication.
+
+8. THE Cloud Sync Application SHALL provide documentation that clearly states the risks of using unofficial APIs, including potential Terms of Service violations, lack of support from GoPro, and risk of service disruption without notice.
+
+9. THE token update script SHALL validate that newly stored tokens work by making a test API call before completing, and SHALL report success or failure to the user.
+
+### Requirement 12: API Resilience
+
+**User Story:** As a system administrator, I want to be notified when the GoPro API structure changes, so that I can take corrective action before widespread failures occur.
+
+#### Acceptance Criteria
+
+1. THE Media Lister SHALL validate that API responses contain expected data structures before processing.
+
+2. WHEN an API response structure differs from expected format, THE Media Lister SHALL publish an alert notification indicating potential API change.
+
+3. THE Media Lister SHALL log the complete API response when structure validation fails to aid in troubleshooting.
+
+4. THE Cloud Sync Application SHALL configure a CloudWatch alarm that triggers when API structure validation failures exceed 3 within a 15-minute period.
+
+### Requirement 13: Extensibility for Multiple Cloud Providers
 
 **User Story:** As a system administrator, I want the architecture to support adding new cloud providers in the future, so that users can sync from multiple sources without redesigning the system.
 
@@ -199,7 +240,7 @@ The initial implementation focuses on GoPro Cloud as the source and AWS S3 with 
 
 2. THE Sync Tracker SHALL include a provider identifier field to distinguish videos from different cloud sources.
 
-3. THE Media Authenticator SHALL accept a provider type parameter to determine which authentication logic to execute.
+3. THE Token Validator SHALL accept a provider type parameter to determine which token validation logic to execute.
 
 4. THE Media Lister SHALL accept a provider type parameter to determine which API to query.
 

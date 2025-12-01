@@ -51,9 +51,105 @@ class LambdaConstruct(Construct):
         self.security_group = security_group
         
         # Create Lambda functions
+        self.token_validator = self._create_token_validator()
         self.media_authenticator = self._create_media_authenticator()
         self.media_lister = self._create_media_lister()
         self.video_downloader = self._create_video_downloader()
+    
+    def _create_token_validator(self) -> lambda_.Function:
+        """Create Token Validator Lambda function"""
+        
+        # Create IAM role
+        role = iam.Role(
+            self, "TokenValidatorRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            description="Role for Token Validator Lambda function",
+        )
+        
+        # Add Secrets Manager read-only permissions
+        role.add_to_policy(iam.PolicyStatement(
+            sid="SecretsManagerReadAccess",
+            effect=iam.Effect.ALLOW,
+            actions=["secretsmanager:GetSecretValue"],
+            resources=[self.secrets_manager_secret_arn],
+        ))
+        
+        # Add CloudWatch Logs permissions
+        role.add_to_policy(iam.PolicyStatement(
+            sid="CloudWatchLogs",
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+            ],
+            resources=["*"],
+        ))
+        
+        # Add CloudWatch Metrics permissions
+        role.add_to_policy(iam.PolicyStatement(
+            sid="CloudWatchMetrics",
+            effect=iam.Effect.ALLOW,
+            actions=["cloudwatch:PutMetricData"],
+            resources=["*"],
+            conditions={
+                "StringEquals": {
+                    "cloudwatch:namespace": "CloudSync/TokenValidation"
+                }
+            },
+        ))
+        
+        # Add X-Ray permissions
+        role.add_to_policy(iam.PolicyStatement(
+            sid="XRayTracing",
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+            ],
+            resources=["*"],
+        ))
+        
+        # Add SNS permissions if topic is configured
+        if self.sns_topic_arn:
+            role.add_to_policy(iam.PolicyStatement(
+                sid="SNSPublish",
+                effect=iam.Effect.ALLOW,
+                actions=["sns:Publish"],
+                resources=[self.sns_topic_arn],
+            ))
+        
+        # Add VPC permissions if VPC is enabled
+        if self.vpc:
+            role.add_managed_policy(
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaVPCAccessExecutionRole"
+                )
+            )
+        
+        # Create Lambda function
+        function = lambda_.Function(
+            self, "TokenValidator",
+            function_name="token-validator",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset("lambda_functions/token_validator"),
+            role=role,
+            layers=[self.lambda_layer],
+            memory_size=256,
+            timeout=Duration.seconds(30),
+            environment={
+                "SECRET_NAME": "gopro/credentials",
+                "SNS_TOPIC_ARN": self.sns_topic_arn or "",
+            },
+            tracing=lambda_.Tracing.ACTIVE,
+            log_retention=logs.RetentionDays.ONE_MONTH,
+            vpc=self.vpc,
+            vpc_subnets=self.vpc_subnets,
+            security_groups=[self.security_group] if self.security_group else None,
+        )
+        
+        return function
     
     def _create_media_authenticator(self) -> lambda_.Function:
         """Create Media Authenticator Lambda function"""
@@ -151,6 +247,14 @@ class LambdaConstruct(Construct):
             description="Role for Media Lister Lambda function",
         )
         
+        # Add Secrets Manager read permissions
+        role.add_to_policy(iam.PolicyStatement(
+            sid="SecretsManagerReadAccess",
+            effect=iam.Effect.ALLOW,
+            actions=["secretsmanager:GetSecretValue"],
+            resources=[self.secrets_manager_secret_arn],
+        ))
+        
         # Add DynamoDB permissions
         role.add_to_policy(iam.PolicyStatement(
             sid="DynamoDBRead",
@@ -178,6 +282,19 @@ class LambdaConstruct(Construct):
             resources=["*"],
         ))
         
+        # Add CloudWatch Metrics permissions
+        role.add_to_policy(iam.PolicyStatement(
+            sid="CloudWatchMetrics",
+            effect=iam.Effect.ALLOW,
+            actions=["cloudwatch:PutMetricData"],
+            resources=["*"],
+            conditions={
+                "StringEquals": {
+                    "cloudwatch:namespace": "CloudSync/MediaListing"
+                }
+            },
+        ))
+        
         # Add X-Ray permissions
         role.add_to_policy(iam.PolicyStatement(
             sid="XRayTracing",
@@ -188,6 +305,15 @@ class LambdaConstruct(Construct):
             ],
             resources=["*"],
         ))
+        
+        # Add SNS permissions if topic is configured
+        if self.sns_topic_arn:
+            role.add_to_policy(iam.PolicyStatement(
+                sid="SNSPublish",
+                effect=iam.Effect.ALLOW,
+                actions=["sns:Publish"],
+                resources=[self.sns_topic_arn],
+            ))
         
         # Add VPC permissions if VPC is enabled
         if self.vpc:
@@ -209,7 +335,9 @@ class LambdaConstruct(Construct):
             memory_size=512,
             timeout=Duration.minutes(5),
             environment={
+                "SECRET_NAME": "gopro/credentials",
                 "DYNAMODB_TABLE": self.dynamodb_table_name,
+                "SNS_TOPIC_ARN": self.sns_topic_arn or "",
                 "PAGE_SIZE": "100",
                 "MAX_VIDEOS": "1000",
             },
@@ -231,6 +359,14 @@ class LambdaConstruct(Construct):
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
             description="Role for Video Downloader Lambda function",
         )
+        
+        # Add Secrets Manager read permissions
+        role.add_to_policy(iam.PolicyStatement(
+            sid="SecretsManagerReadAccess",
+            effect=iam.Effect.ALLOW,
+            actions=["secretsmanager:GetSecretValue"],
+            resources=[self.secrets_manager_secret_arn],
+        ))
         
         # Add S3 permissions
         role.add_to_policy(iam.PolicyStatement(
@@ -326,9 +462,11 @@ class LambdaConstruct(Construct):
             timeout=Duration.minutes(15),
             environment={
                 "S3_BUCKET": self.s3_bucket_name,
+                "SECRET_NAME": "gopro/credentials",
                 "DYNAMODB_TABLE": self.dynamodb_table_name,
                 "MULTIPART_THRESHOLD": "104857600",  # 100 MB
                 "CHUNK_SIZE": "104857600",  # 100 MB
+                "ENVIRONMENT": "dev",
             },
             tracing=lambda_.Tracing.ACTIVE,
             log_retention=logs.RetentionDays.ONE_MONTH,

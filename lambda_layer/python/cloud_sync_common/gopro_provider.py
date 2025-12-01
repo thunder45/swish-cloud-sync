@@ -159,18 +159,26 @@ class GoProProvider(CloudProviderInterface):
     )
     def list_media(
         self,
-        auth_token: str,
-        user_id: str,
+        cookies: str = None,
+        user_agent: str = None,
+        auth_token: str = None,
+        user_id: str = None,
         page_size: int = 100,
-        max_videos: int = 1000
+        max_videos: int = None,
+        max_results: int = 1000
     ) -> List[VideoMetadata]:
         """List all videos from GoPro Cloud with pagination.
         
+        Supports both cookie-based and OAuth authentication.
+        
         Args:
-            auth_token: Authentication token
-            user_id: User identifier
+            cookies: Cookie header string (for unofficial API)
+            user_agent: User agent string (for unofficial API)
+            auth_token: Authentication token (for OAuth, deprecated)
+            user_id: User identifier (for OAuth, deprecated)
             page_size: Number of items per page (max 100)
-            max_videos: Maximum number of videos to retrieve
+            max_videos: Maximum number of videos (deprecated, use max_results)
+            max_results: Maximum number of videos to retrieve
             
         Returns:
             List of VideoMetadata objects
@@ -178,31 +186,56 @@ class GoProProvider(CloudProviderInterface):
         Raises:
             APIError: If API call fails
         """
+        # Handle legacy parameter names
+        if max_videos and not max_results:
+            max_results = max_videos
+        elif not max_results:
+            max_results = 1000
+            
         logger.info(
-            f"Listing GoPro media for user {user_id}",
+            f"Listing GoPro media",
             extra={
-                "user_id": user_id,
                 "page_size": page_size,
-                "max_videos": max_videos
+                "max_results": max_results,
+                "auth_method": "cookies" if cookies else "oauth"
             }
         )
         
         videos = []
         page = 1
         
-        while len(videos) < max_videos:
+        while len(videos) < max_results:
             try:
-                response = requests.get(
-                    self.MEDIA_SEARCH_URL,
-                    headers={
+                # Build headers based on auth method
+                if cookies:
+                    # Cookie-based authentication (unofficial API)
+                    headers = {
+                        'Cookie': cookies,
+                        'User-Agent': user_agent or 'Mozilla/5.0',
+                        'Accept': 'application/vnd.gopro.jk.media+json; version=2.0.0',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Referer': 'https://gopro.com/'
+                    }
+                    # Use unofficial API endpoint
+                    api_url = "https://api.gopro.com/media/search"
+                else:
+                    # OAuth authentication (official API)
+                    headers = {
                         'Authorization': f'Bearer {auth_token}',
                         'Accept': 'application/json'
-                    },
-                    params={
-                        'page': page,
-                        'per_page': min(page_size, 100),  # GoPro API max is 100
-                        'media_type': 'video'
-                    },
+                    }
+                    api_url = self.MEDIA_SEARCH_URL
+                
+                # Build params
+                params = {
+                    'page': page,
+                    'per_page': min(page_size, 100),  # GoPro API max is 100
+                }
+                
+                response = requests.get(
+                    api_url,
+                    headers=headers,
+                    params=params,
                     timeout=60
                 )
                 
@@ -225,7 +258,14 @@ class GoProProvider(CloudProviderInterface):
                     )
                 
                 data = response.json()
-                media_items = data.get('media', [])
+                
+                # Handle both response structures
+                # Official API: data['media']
+                # Unofficial API: data['_embedded']['media']
+                if '_embedded' in data:
+                    media_items = data['_embedded'].get('media', [])
+                else:
+                    media_items = data.get('media', [])
                 
                 if not media_items:
                     logger.info(f"No more media items found on page {page}")
@@ -234,11 +274,25 @@ class GoProProvider(CloudProviderInterface):
                 # Parse media items
                 for item in media_items:
                     try:
+                        # Strict filtering for GoPro camera files only
+                        filename = item.get('filename', '')
+                        
+                        # Skip if no filename
+                        if not filename:
+                            logger.debug(f"Skipping item with no filename: {item.get('id')}")
+                            continue
+                        
+                        # Only include files starting with GH or GO (GoPro camera naming)
+                        # GH = GoPro HERO series, GO = older GoPro models
+                        if not (filename.startswith('GH') or filename.startswith('GO')):
+                            logger.debug(f"Skipping non-GoPro filename: {filename}")
+                            continue
+                        
                         video = self._parse_media_item(item)
                         videos.append(video)
                         
-                        if len(videos) >= max_videos:
-                            logger.info(f"Reached max_videos limit: {max_videos}")
+                        if len(videos) >= max_results:
+                            logger.info(f"Reached max_results limit: {max_results}")
                             break
                     except (KeyError, ValueError) as e:
                         logger.warning(
@@ -248,10 +302,23 @@ class GoProProvider(CloudProviderInterface):
                         continue
                 
                 # Check if there are more pages
-                total_pages = data.get('total_pages', page)
-                if page >= total_pages:
-                    logger.info(f"Reached last page: {page}")
-                    break
+                # Unofficial API uses _pages with different field names
+                if '_pages' in data:
+                    total_pages = data['_pages'].get('total_pages', data['_pages'].get('total', 1))
+                    current_page = data['_pages'].get('current_page', data['_pages'].get('page', page))
+                    total_items = data['_pages'].get('total_items', 0)
+                    
+                    logger.info(f"Page {current_page}/{total_pages}, {len(media_items)} items on this page, {total_items} total items")
+                    
+                    if current_page >= total_pages:
+                        logger.info(f"Reached last page: {current_page}/{total_pages}")
+                        break
+                else:
+                    # Official API
+                    total_pages = data.get('total_pages', page)
+                    if page >= total_pages:
+                        logger.info(f"Reached last page: {page}/{total_pages}")
+                        break
                 
                 page += 1
                 
@@ -286,25 +353,43 @@ class GoProProvider(CloudProviderInterface):
         filename = item.get('filename', f"{media_id}.MP4")
         
         # Get download URL
-        download_url = self.get_download_url(media_id, '')  # Will be called with auth token later
+        # Unofficial API provides a 'token' field for downloading
+        token = item.get('token', '')
+        if token:
+            # Use token-based URL for unofficial API
+            # URL format: https://api.gopro.com/media/{media_id}/download?t={token}
+            download_url = f"https://api.gopro.com/media/{media_id}/download?t={token}"
+        else:
+            # Official API format
+            download_url = self.get_download_url(media_id, '')
         
-        # Parse file size
-        file_size = item.get('file_size', 0)
-        if isinstance(file_size, str):
+        # Parse file size (may be null in unofficial API)
+        file_size = item.get('file_size')
+        if file_size is None:
+            # Estimate based on resolution and duration
+            # For now, use 0 - will be updated during download
+            file_size = 0
+        elif isinstance(file_size, str):
             file_size = int(file_size)
         
         # Parse upload date
-        upload_date = item.get('created_at', item.get('captured_at', ''))
+        upload_date = item.get('created_at') or item.get('captured_at') or item.get('client_updated_at')
         if not upload_date:
             upload_date = datetime.utcnow().isoformat() + 'Z'
         
-        # Parse duration (in seconds)
-        duration = item.get('duration')
+        # Parse duration (may be null or in source_duration in milliseconds)
+        duration = item.get('duration') or item.get('source_duration')
         if duration and isinstance(duration, str):
             try:
-                duration = int(float(duration))
+                # source_duration is in milliseconds, convert to seconds
+                duration = int(float(duration)) // 1000
             except ValueError:
-                duration = None
+                duration = 0
+        elif isinstance(duration, int):
+            # Already a number, convert from milliseconds to seconds
+            duration = duration // 1000
+        elif duration is None:
+            duration = 0
         
         return VideoMetadata(
             media_id=media_id,
@@ -316,22 +401,91 @@ class GoProProvider(CloudProviderInterface):
             provider='gopro'
         )
     
-    def get_download_url(self, media_id: str, auth_token: str) -> str:
+    def get_download_url(
+        self,
+        media_id: str,
+        cookies: str = None,
+        user_agent: str = None,
+        auth_token: str = None,
+        quality: str = 'source'
+    ) -> str:
         """Get download URL for a specific video.
+        
+        For unofficial API, this is a 2-step process:
+        1. Call /media/{media_id}/download to get file variations
+        2. Extract the pre-signed CloudFront URL for the desired quality
         
         Args:
             media_id: Video identifier
-            auth_token: Authentication token (not used for GoPro, URL is direct)
+            cookies: Cookie string (for unofficial API)
+            user_agent: User agent (for unofficial API)
+            auth_token: Authentication token (for OAuth, deprecated)
+            quality: Desired quality ('source', 'high_res_proxy_mp4', 'edit_proxy')
             
         Returns:
-            Download URL string
+            Pre-signed CloudFront download URL
             
         Raises:
-            APIError: If API call fails
+            APIError: If API call fails or quality not available
         """
-        # GoPro API provides direct download URLs
-        # Format: https://api.gopro.com/media/{media_id}/download
-        return f"{self.BASE_URL}/media/{media_id}/download"
+        if cookies:
+            # Unofficial API: 2-step download process
+            headers = {
+                'Cookie': cookies,
+                'User-Agent': user_agent or 'Mozilla/5.0',
+                'Accept': 'application/vnd.gopro.jk.media+json; version=2.0.0',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://gopro.com/'
+            }
+            
+            try:
+                response = requests.get(
+                    f"https://api.gopro.com/media/{media_id}/download",
+                    headers=headers,
+                    timeout=30
+                )
+                
+                if response.status_code != 200:
+                    raise APIError(
+                        f"Failed to get download URL: HTTP {response.status_code}",
+                        status_code=response.status_code
+                    )
+                
+                data = response.json()
+                
+                # Find the requested quality in files or variations
+                files = data.get('_embedded', {}).get('files', [])
+                variations = data.get('_embedded', {}).get('variations', [])
+                
+                # Try files first (primary quality)
+                for file in files:
+                    if file.get('label') == quality and file.get('available'):
+                        return file['url']
+                
+                # Try variations (alternative qualities)
+                for var in variations:
+                    if var.get('label') == quality and var.get('available'):
+                        return var['url']
+                
+                # If source not found, try high_res_proxy_mp4
+                if quality == 'source':
+                    logger.warning(f"Source quality not available for {media_id}, trying high_res_proxy_mp4")
+                    for file in files + variations:
+                        if file.get('label') == 'high_res_proxy_mp4' and file.get('available'):
+                            return file['url']
+                
+                raise APIError(
+                    f"Quality '{quality}' not available for media {media_id}",
+                    status_code=404
+                )
+                
+            except requests.exceptions.Timeout as e:
+                raise APIError(f"Timeout getting download URL: {e}", status_code=408)
+            except requests.exceptions.RequestException as e:
+                raise APIError(f"Network error getting download URL: {e}", status_code=500)
+        else:
+            # Official API format
+            return f"{self.BASE_URL}/media/{media_id}/download"
 
 
 # Register GoPro provider with factory

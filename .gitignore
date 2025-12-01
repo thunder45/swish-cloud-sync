@@ -69,6 +69,7 @@ secrets/
 *.pem
 *.key
 credentials.json
+scripts/cookies.txt
 
 # Node modules (if using TypeScript CDK)
 node_modules/

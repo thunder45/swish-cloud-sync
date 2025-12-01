@@ -11,6 +11,11 @@ class AuthenticationError(CloudSyncError):
     pass
 
 
+class TokenExpiredError(AuthenticationError):
+    """Raised when authentication token expires."""
+    pass
+
+
 class APIError(CloudSyncError):
     """Raised when API call fails."""
     
