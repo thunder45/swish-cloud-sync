@@ -110,24 +110,23 @@ The Cloud Sync Application is a serverless, event-driven system built on AWS tha
 
 ## Components and Interfaces
 
-### Component 1: Media Authenticator (Lambda Function)
+### Component 1: Token Validator (Lambda Function)
 
-**Purpose**: Authenticate with cloud provider APIs and manage credential lifecycle.
+**Purpose**: Validate stored authentication tokens with cloud provider APIs before sync execution.
 
 **Technical Specifications**:
 - **Runtime**: Python 3.12
 - **Memory**: 256 MB
 - **Timeout**: 30 seconds
-- **Concurrency**: 1 (serial authentication)
+- **Concurrency**: 1 (serial validation)
 - **Environment Variables**:
   - `SECRET_NAME`: "gopro/credentials"
-  - `TOKEN_EXPIRY_HOURS`: 24
 
 **Input Interface**:
 ```json
 {
   "provider": "gopro",
-  "action": "authenticate"
+  "action": "validate"
 }
 ```
 
@@ -136,58 +135,117 @@ The Cloud Sync Application is a serverless, event-driven system built on AWS tha
 {
   "statusCode": 200,
   "provider": "gopro",
-  "auth_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "user_id": "12345678",
-  "expires_at": "2025-11-13T02:00:00Z"
+  "tokens_valid": true,
+  "auth_headers": {
+    "gp-access-token": "abc123...",
+    "Cookie": "session=xyz...",
+    "User-Agent": "Mozilla/5.0..."
+  },
+  "last_updated": "2025-11-13T02:00:00Z"
 }
 ```
 
 **Core Logic**:
 1. Retrieve secret from Secrets Manager using boto3
-2. Parse stored credentials (refresh_token, access_token, timestamp, user_id)
-3. Check token expiration (current_time + 24 hours)
-4. If expired or missing:
-   - Use OAuth 2.0 refresh token flow to obtain new access token
-   - Store new access token and refresh token with current timestamp
-5. Return authentication headers
+2. Parse stored authentication data (gp-access-token, cookies, user-agent, last_updated)
+3. Make test API call to GoPro Cloud to verify tokens still work:
+   ```python
+   response = requests.get(
+       "https://api.gopro.com/media/search?per_page=1",
+       headers={
+           "gp-access-token": stored_token,
+           "Cookie": stored_cookies,
+           "User-Agent": stored_user_agent
+       }
+   )
+   ```
+4. If response is 200: Return auth headers for downstream use
+5. If response is 401/403: Publish SNS alert for manual token refresh, fail execution
+6. Optional: Check token age and warn if approaching typical expiration (if pattern identified)
 
-**OAuth 2.0 Flow**:
+**Token Validation Logic**:
 ```python
-def refresh_access_token(refresh_token: str) -> Dict[str, Any]:
-    """Refresh access token using OAuth 2.0 refresh token flow"""
-    response = requests.post(
-        "https://api.gopro.com/v1/oauth2/token",
-        json={
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": os.environ["GOPRO_CLIENT_ID"],
-            "client_secret": os.environ["GOPRO_CLIENT_SECRET"]
-        }
-    )
+def validate_tokens(credentials: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate stored tokens with test API call"""
     
-    if response.status_code == 200:
-        data = response.json()
-        return {
-            "access_token": data["access_token"],
-            "refresh_token": data.get("refresh_token", refresh_token),  # Some APIs return new refresh token
-            "expires_in": data["expires_in"],
-            "token_type": data["token_type"]
-        }
-    else:
-        raise AuthenticationError(f"Token refresh failed: {response.status_code}")
+    # Extract stored tokens
+    auth_headers = {
+        "gp-access-token": credentials.get("gp-access-token"),
+        "Cookie": credentials.get("cookies"),
+        "User-Agent": credentials.get("user-agent", "Mozilla/5.0...")
+    }
+    
+    # Make test API call
+    try:
+        response = requests.get(
+            "https://api.gopro.com/media/search",
+            headers=auth_headers,
+            params={"per_page": 1},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            logger.info("Token validation successful")
+            return {
+                "valid": True,
+                "auth_headers": auth_headers
+            }
+        elif response.status_code in [401, 403]:
+            logger.error("Tokens expired or invalid")
+            publish_token_expiry_alert()
+            raise TokenExpiredError("Manual token refresh required")
+        else:
+            logger.warning(f"Unexpected response: {response.status_code}")
+            raise ValidationError(f"Unexpected API response: {response.status_code}")
+            
+    except requests.exceptions.Timeout:
+        logger.error("Token validation timeout")
+        raise ValidationError("API timeout during validation")
 ```
 
 **Error Handling**:
-- Invalid credentials (401) → Publish SNS alert, return error, require manual re-authentication
-- Refresh token expired → Publish SNS alert, require manual OAuth flow
+- Invalid/expired tokens (401/403) → Publish SNS alert with refresh instructions, fail execution
 - Network timeout → Retry 3x with exponential backoff (2s, 4s, 8s)
 - Secrets Manager unavailable → Return 500, fail execution
+- Unexpected API response → Log full response, alert for potential API change
+
+**SNS Alert Message** (Token Expiry):
+```
+Subject: GoPro Sync - Manual Token Refresh Required
+
+Your GoPro Cloud authentication tokens have expired.
+
+Action Required:
+1. Log into https://gopro.com in your browser
+2. Follow token extraction guide: docs/TOKEN_EXTRACTION_GUIDE.md
+3. Run token update script: scripts/update_gopro_tokens.sh
+4. Verify tokens work with validation script
+
+The sync workflow has been paused until tokens are refreshed.
+```
+
+**Known GoPro Cloud API Endpoints** (Unofficial, may change without notice):
+
+- **List media**: `GET https://api.gopro.com/media/search`
+  - Query params: `page` (integer), `per_page` (integer, max 100)
+  - Returns: JSON with media array containing video metadata
+  - Used by: Media Lister Lambda
+
+- **Download media**: `GET https://api.gopro.com/media/{media_id}/download`
+  - Returns: Direct download URL or streaming response
+  - Used by: Video Downloader Lambda
+
+- **Media details**: `GET https://api.gopro.com/media/{media_id}`
+  - Returns: Detailed media metadata (duration, resolution, etc.)
+  - Used by: Media Lister Lambda (optional)
+
+**Important**: These endpoints are reverse-engineered from browser traffic and are not officially documented by GoPro. They may change at any time without notice.
 
 **Dependencies**:
 - boto3 (AWS SDK)
 - requests (HTTP client)
 - AWS Secrets Manager
-- GoPro Cloud API
+- GoPro Cloud API (unofficial endpoints)
 
 
 ### Component 2: Media Lister (Lambda Function)
@@ -489,15 +547,15 @@ Next execution picks up from continuation_token
 ```json
 {
   "Comment": "GoPro Cloud to S3 Sync Orchestration",
-  "StartAt": "AuthenticateProvider",
+  "StartAt": "ValidateTokens",
   "TimeoutSeconds": 7200,
   "States": {
-    "AuthenticateProvider": {
+    "ValidateTokens": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:${region}:${account}:function:media-authenticator",
+      "Resource": "arn:aws:lambda:${region}:${account}:function:token-validator",
       "Parameters": {
         "provider": "gopro",
-        "action": "authenticate"
+        "action": "validate"
       },
       "ResultPath": "$.auth",
       "Retry": [
@@ -842,49 +900,122 @@ s3://gopro-archive-bucket-{account-id}/
 **Secret Configuration**:
 - **Secret Name**: `gopro/credentials`
 - **Encryption**: AWS managed key (default)
-- **Rotation**: Manual (90-day reminder via CloudWatch Events)
-- **Access**: Restricted to Media Authenticator Lambda role only
+- **Rotation**: Manual only (no automatic rotation possible)
+- **Access**: Restricted to Token Validator Lambda role only (read-only)
 
 **Secret Structure**:
 ```json
 {
   "provider": "gopro",
-  "username": "user@example.com",
-  "password": "encrypted_password",
-  "jwt_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "user_id": "12345678",
-  "token_timestamp": "2025-11-11T02:00:00Z",
-  "last_updated": "2025-11-11T02:00:00Z"
+  "gp_access_token": "eyJhbGciOiJSU0EtT0FFUCIsImVuYyI6IkExMjhHQ00ifQ.H1CekSu_HAMyJV6ye-jQb9EDYNvUAE2TiUYyyIg9v3EDZUQPdn3hNx836XUNi9hW4GBBDhVJfWveNWKXKnUEDFrjbrl767rtT99rq7ZV_q5F_TUrvWIHE8-kRUWbmKV0jed7x7dWVHKb6-l8Imu4MEJVF2g7RqhNk87G8I4DC3YuVWU2ScIH1eI0t9sH2Y6wwdcZYDVjQagTw8itRuv2VdDYW007kRwYfQu1qWAy9hspVOYVQ0TSbYVxKSKGZrrKCL8Xl56GGd21KkSxthl7FMb1KAC89bpk0UBtQi38JLHeHfmOv8ZgYImPcNwtYA5SUBVzhfMvzimJy4pveqa9rA.bJk9EtJuzQLpP0m8.Cfc2XcL_j9u1ELf_RboxLOynjiY94ev_AuswMbL0HgFTsnLubA2j2aU1kMwfpk1KbPWrQz6FCvF690hSJ61JuhAjTdsYtFMTPVjzqZLmUVKFQl0QpP4DmjmM1SC_ah2uXgKbqAxe2z7FYhV_p3ACdixzVv0QDvEqGGC9NTnOMxZ7L_E_LszyeLUkt8wk7jkf0u489JhkHipoHkO5TZ-Zw5OEGxPRSoHIXb-KXYsj9E4g6FgM2wDpB7Y36S2QJCrfsRxvTrdjBA460XF8yTwTA2D1XoIrp2RyB6jeFljiPz39LCgIxxGiqKZ-OHEO4lHJyrzz_KDl4oAp3eInD8Ozu8X9kHhyGb9HnWiQ4Vr20OUO6Yv448wkbN-g4q6iS37c_wd1bCto9HVlQr8ll45qyxnzy1vmjUGXPcHpCr0yYj6XpEBjpjbflBebmsatR9xRLvwQP4ZvOaFFn9i2kL7iXFwAy41pO3FzK8Bsuk3w_1DyQC3Iqbz87KR1vybpn-Ktx8jDLAJGF2BArl5L82zgRvsAFKo2W4Q-THWvQhP1Ymu9vUXrNoi62AtbCodGBc6yD2cYEXbmrNBRvjN35RQjz7MWzKqpf_pJeGJ6Tarc9aJxHhJq5brYSTF87OVohxJN1274cVHCqSqEd9fO6S4C9afqmq2FyPrNb1HA_AKH2ScihDk50ZDlYyguSFSFZksmkibmzHoDMr_o5Dqg0kSEGZizi1Y7qqkbAMoqZPrdln04YxF4rlr4ktUK77eXRf485GAdZinIkKowB3pOkIR6KJRI0GIvET0LhxHdWC3XIailRqSXHZtu13v1TvwR7lfPR94bNUuMEbAtNnUwOxM-t8oh9QNz1bztAvP8_GAnAyF6aweF.4CPmZLVvSY2mk-s1tifXPQ",
+  "gp_user_id": "7cb49f28-0770-4cf0-a3f5-3e4ce9a9301f",
+  "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36...",
+  "last_updated": "2025-11-11T02:00:00Z",
+  "extracted_by": "user@example.com",
+  "notes": "Tokens extracted from gopro.com/media-library/ on 2025-11-11",
+  "full_cookie_header": "gp_access_token=...; gp_user_id=...; session=...; sessionId=..."
 }
 ```
 
-**Rotation Strategy**:
-- OAuth 2.0 refresh tokens enable automatic rotation
-- Implement Lambda-based rotation function for refresh token renewal
-- Rotation schedule: Every 30 days (well before typical 90-day expiry)
-- CloudWatch Event triggers rotation Lambda
-- Rotation Lambda tests new credentials before completing rotation
+**Note**: Based on real-world testing and reverse-engineered solutions:
+- `gp_access_token`: Encrypted JWT (JWE) authentication token - 500-1000+ characters, starts with `eyJhbGciOiJSU0EtT0FFUCIsImVuYyI6IkExMjhHQ00ifQ`
+- `gp_user_id`: UUID format user identifier (e.g., `7cb49f28-0770-4cf0-a3f5-3e4ce9a9301f`)
+- Additional cookies (`session`, `sessionId`, etc.) stored as backup in case they're needed
+- Extract from: `gopro.com/media-library/` (not `plus.gopro.com`)
+- Found in: Cookie header of requests to `api.gopro.com`
 
-**Automatic Rotation Lambda**:
-```python
-def rotate_secret(event, context):
-    """
-    Rotate OAuth refresh token
-    
-    Steps:
-    1. Retrieve current secret
-    2. Use refresh token to get new access token
-    3. Test new credentials with API call
-    4. Update secret with new tokens
-    5. Verify rotation successful
-    """
-    secrets_client = boto3.client('secretsmanager')
-    
-    # Get current secret
-    secret = secrets_client.get_secret_value(SecretId='gopro/credentials')
-    current_creds = json.loads(secret['SecretString'])
-    
-    # Refresh access token
+**Manual Update Process**:
+1. User logs into GoPro Cloud via browser
+2. User extracts authentication headers using browser DevTools or extension
+3. User runs update script: `scripts/update_gopro_tokens.sh`
+4. Script validates tokens with test API call
+5. Script updates Secrets Manager with new tokens
+6. Script confirms successful update
+
+**Token Update Script**:
+```bash
+#!/bin/bash
+# scripts/update_gopro_tokens.sh
+
+set -e
+
+echo "GoPro Token Update Script"
+echo "========================="
+echo ""
+echo "You need to extract 2 cookies from gopro.com/media-library/:"
+echo "1. gp_access_token (Encrypted JWT starting with eyJhbGciOiJSU0EtT0FFUCIsImVuYyI6IkExMjhHQ00ifQ...)"
+echo "2. gp_user_id (UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
+echo ""
+echo "Find these in Network tab → api.gopro.com request → Cookie header"
+echo ""
+
+# Prompt for tokens
+read -p "Enter gp_access_token: " GP_ACCESS_TOKEN
+read -p "Enter gp_user_id: " GP_USER_ID
+read -p "Enter full Cookie header (optional, for backup): " FULL_COOKIE
+read -p "Enter user-agent (optional, press enter for default): " USER_AGENT
+
+# Default user agent if not provided
+if [ -z "$USER_AGENT" ]; then
+    USER_AGENT="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+fi
+
+# Create JSON payload
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+JSON_PAYLOAD=$(cat <<EOF
+{
+  "provider": "gopro",
+  "gp_access_token": "$GP_ACCESS_TOKEN",
+  "gp_user_id": "$GP_USER_ID",
+  "user-agent": "$USER_AGENT",
+  "last_updated": "$TIMESTAMP",
+  "extracted_by": "$USER",
+  "notes": "Tokens extracted from gopro.com/media-library/ on $TIMESTAMP",
+  "full_cookie_header": "$FULL_COOKIE"
+}
+EOF
+)
+
+# Validate tokens with test API call
+echo ""
+echo "Validating tokens..."
+VALIDATION_RESPONSE=$(curl -s -w "\n%{http_code}" \
+    -H "Authorization: Bearer $GP_ACCESS_TOKEN" \
+    -H "User-Agent: $USER_AGENT" \
+    "https://api.gopro.com/media/search?per_page=1")
+
+HTTP_CODE=$(echo "$VALIDATION_RESPONSE" | tail -n1)
+
+if [ "$HTTP_CODE" = "200" ]; then
+    echo "✓ Token validation successful"
+else
+    echo "✗ Token validation failed (HTTP $HTTP_CODE)"
+    echo "Please check your tokens and try again"
+    exit 1
+fi
+
+# Update Secrets Manager
+echo ""
+echo "Updating AWS Secrets Manager..."
+aws secretsmanager update-secret \
+    --secret-id gopro/credentials \
+    --secret-string "$JSON_PAYLOAD"
+
+echo "✓ Tokens updated successfully in Secrets Manager"
+echo ""
+echo "You can now trigger a sync execution."
+```
+
+**Token Expiry Monitoring**:
+- No automatic expiration detection (unknown token lifespan)
+- Reactive detection via 401/403 responses during sync
+- SNS alert sent when expiration detected
+- User must manually refresh tokens following documentation
+
+**Rotation Reminder**:
+- Optional CloudWatch Event for periodic reminder (e.g., every 30 days)
+- Reminder does not perform rotation, only alerts user to check tokens
+- User can proactively refresh tokens before expiration if desiredRefresh access token
     new_tokens = refresh_access_token(current_creds['refresh_token'])
     
     # Test new credentials
@@ -1278,7 +1409,7 @@ def test_lambda_failure_during_download():
 ### CloudWatch Logs
 
 **Log Groups**:
-- `/aws/lambda/media-authenticator`
+- `/aws/lambda/token-validator`
 - `/aws/lambda/media-lister`
 - `/aws/lambda/video-downloader`
 - `/aws/states/gopro-sync-orchestrator`
@@ -1343,8 +1474,9 @@ fields @timestamp, media_id, filename, file_size_bytes, transfer_duration_second
 | `BytesTransferred` | Bytes | Total bytes transferred | Provider, Environment |
 | `TransferDuration` | Seconds | Time to transfer single video | Provider, Environment |
 | `TransferThroughput` | Megabits/sec | Network throughput | Provider, Environment |
-| `AuthenticationSuccess` | Count | Successful auth attempts | Provider, Environment |
-| `AuthenticationFailure` | Count | Failed auth attempts | Provider, Environment |
+| `TokenValidationSuccess` | Count | Successful token validations | Provider, Environment |
+| `TokenValidationFailure` | Count | Failed token validations | Provider, Environment |
+| `TokenExpired` | Count | Expired token detections | Provider, Environment |
 | `VideosDiscovered` | Count | Total videos found | Provider, Environment |
 | `NewVideosFound` | Count | New videos requiring sync | Provider, Environment |
 
@@ -1369,7 +1501,8 @@ fields @timestamp, media_id, filename, file_size_bytes, transfer_duration_second
 | Alarm Name | Metric | Threshold | Period | Evaluation Periods | Action |
 |------------|--------|-----------|--------|-------------------|--------|
 | `GoPro-Sync-HighFailureRate` | SyncFailures | > 3 | 5 min | 1 | SNS alert |
-| `GoPro-Auth-Failure` | AuthenticationFailure | > 1 | 5 min | 1 | SNS alert |
+| `GoPro-Token-Expired` | TokenExpired | > 0 | 5 min | 1 | SNS alert |
+| `GoPro-Token-Validation-Failure` | TokenValidationFailure | > 1 | 5 min | 1 | SNS alert |
 | `GoPro-Lambda-Errors` | Errors (Lambda) | > 5 | 5 min | 1 | SNS alert |
 | `GoPro-Lambda-Throttles` | Throttles (Lambda) | > 1 | 5 min | 1 | SNS alert |
 | `GoPro-StepFunction-Failed` | ExecutionsFailed | > 1 | 5 min | 1 | SNS alert |
@@ -1540,7 +1673,7 @@ EventBridge → Step Functions → Lambda (Auth) → Secrets Manager
 
 ### IAM Roles and Policies
 
-**Role 1: media-authenticator-role**
+**Role 1: token-validator-role**
 
 **Trust Policy**:
 ```json
@@ -1564,13 +1697,20 @@ EventBridge → Step Functions → Lambda (Auth) → Secrets Manager
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "SecretsManagerAccess",
+      "Sid": "SecretsManagerReadOnly",
       "Effect": "Allow",
       "Action": [
-        "secretsmanager:GetSecretValue",
-        "secretsmanager:UpdateSecretValue"
+        "secretsmanager:GetSecretValue"
       ],
       "Resource": "arn:aws:secretsmanager:${region}:${account}:secret:gopro/credentials-*"
+    },
+    {
+      "Sid": "SNSPublish",
+      "Effect": "Allow",
+      "Action": [
+        "sns:Publish"
+      ],
+      "Resource": "arn:aws:sns:${region}:${account}:gopro-sync-alerts"
     },
     {
       "Sid": "CloudWatchLogs",
@@ -1580,7 +1720,7 @@ EventBridge → Step Functions → Lambda (Auth) → Secrets Manager
         "logs:CreateLogStream",
         "logs:PutLogEvents"
       ],
-      "Resource": "arn:aws:logs:${region}:${account}:log-group:/aws/lambda/media-authenticator:*"
+      "Resource": "arn:aws:logs:${region}:${account}:log-group:/aws/lambda/token-validator:*"
     },
     {
       "Sid": "XRayTracing",
@@ -1731,7 +1871,7 @@ EventBridge → Step Functions → Lambda (Auth) → Secrets Manager
         "lambda:InvokeFunction"
       ],
       "Resource": [
-        "arn:aws:lambda:${region}:${account}:function:media-authenticator",
+        "arn:aws:lambda:${region}:${account}:function:token-validator",
         "arn:aws:lambda:${region}:${account}:function:media-lister",
         "arn:aws:lambda:${region}:${account}:function:video-downloader"
       ]

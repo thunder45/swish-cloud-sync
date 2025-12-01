@@ -1,0 +1,12 @@
+PASTE_YOUR_ENTIRE_COOKIE_STRING_HERE
+
+Example format:
+ajs_anonymous_id=xxx; OptanonAlertBoxClosed=xxx; _gcl_au=xxx; _ga=xxx; gp_access_token=eyJhbGciOiJSU0EtT0FFUCIsImVuYyI6IkExMjhHQ00ifQ...; gp_user_id=xxx; gp_logged_in=; gp_language=en; _session_id=xxx; ...
+
+Instructions:
+1. Copy this file: cp scripts/cookies.txt.template scripts/cookies.txt
+2. Open scripts/cookies.txt and replace ALL content with your full cookie string from browser
+3. Run: ./scripts/update_gopro_tokens.sh
+4. When prompted, enter: scripts/cookies.txt
+
+Note: The script will automatically extract the gp_access_token from your cookie string.

@@ -56,7 +56,8 @@ Built on AWS serverless technologies:
 - Python 3.12+
 - AWS CLI configured with appropriate credentials
 - AWS CDK CLI installed (`npm install -g aws-cdk`)
-- GoPro Developer account with OAuth credentials
+- GoPro Cloud account with videos
+- Web browser (Chrome or Firefox) for cookie extraction
 
 ## Installation
 
@@ -101,12 +102,25 @@ cdk deploy -c environment=staging
 cdk deploy -c environment=prod
 ```
 
-### GoPro OAuth Setup
+### GoPro Authentication Setup
 
-1. Register application at [GoPro Developer Portal](https://developers.gopro.com)
-2. Obtain `client_id` and `client_secret`
-3. Perform initial OAuth flow to get `refresh_token`
-4. Store credentials in AWS Secrets Manager (see deployment steps)
+**Important**: This application uses GoPro's unofficial API with cookie-based authentication.
+
+1. Extract authentication cookies from your browser session
+   - Follow the detailed guide: `docs/TOKEN_EXTRACTION_GUIDE.md`
+   - Or quick start: `docs/TASK_3.3_QUICK_START.md`
+   
+2. Store cookies in AWS Secrets Manager:
+```bash
+cd /path/to/swish-cloud-sync
+./scripts/update_gopro_tokens.sh
+```
+
+3. Cookies expire periodically (~1-4 weeks) and require manual refresh
+   - You'll receive SNS email alerts when cookies expire
+   - Refresh takes ~10 minutes following the same process
+
+**Note**: See `docs/GOPRO_REALITY_CHECK.md` for details on the unofficial API approach.
 
 ## Deployment
 
@@ -127,18 +141,19 @@ cdk synth
 cdk deploy
 ```
 
-4. Store GoPro credentials in Secrets Manager:
+4. Extract and store GoPro cookies:
 ```bash
-aws secretsmanager create-secret \
-  --name gopro/credentials \
-  --secret-string '{
-    "provider": "gopro",
-    "client_id": "YOUR_CLIENT_ID",
-    "client_secret": "YOUR_CLIENT_SECRET",
-    "refresh_token": "YOUR_REFRESH_TOKEN",
-    "user_id": "YOUR_USER_ID"
-  }'
+# Follow the cookie extraction guide
+cat docs/TOKEN_EXTRACTION_GUIDE.md
+
+# Run the update script
+./scripts/update_gopro_tokens.sh
 ```
+
+The script will:
+- Validate your cookies with a test API call
+- Create/update the `gopro/credentials` secret
+- Confirm cookies are working
 
 ### Subsequent Deployments
 
@@ -150,12 +165,16 @@ cdk deploy
 
 ### Manual Execution
 
-Trigger sync manually via AWS Console or CLI:
+**List your GoPro videos:**
+```bash
+python3 scripts/list_gopro_videos.py
+```
 
+**Trigger sync manually** (after Step Functions deployment):
 ```bash
 aws stepfunctions start-execution \
   --state-machine-arn arn:aws:states:REGION:ACCOUNT:stateMachine:gopro-sync-orchestrator \
-  --input '{"provider": "gopro"}'
+  --input '{}'
 ```
 
 ### Scheduled Execution
@@ -249,9 +268,30 @@ mypy cloud_sync/ lambda_layer/ lambdas/
 
 ### Authentication Failures
 
-1. Check Secrets Manager for valid credentials
-2. Verify OAuth refresh token hasn't expired
-3. Check CloudWatch Logs for detailed error messages
+1. Check if cookies have expired:
+```bash
+python3 scripts/list_gopro_videos.py
+```
+
+2. If cookies expired, extract fresh ones:
+```bash
+./scripts/update_gopro_tokens.sh
+```
+
+3. Check CloudWatch Logs for detailed error messages:
+```bash
+aws logs tail /aws/lambda/token-validator --follow
+```
+
+### Cookie Refresh
+
+When you receive "Cookies Expired" alert:
+1. Open browser and login to https://gopro.com/media-library/
+2. Follow `docs/TOKEN_EXTRACTION_GUIDE.md` to extract new cookies
+3. Run `./scripts/update_gopro_tokens.sh` to update
+4. Verify with `python3 scripts/list_gopro_videos.py`
+
+**Time required**: ~10 minutes
 
 ### Transfer Failures
 

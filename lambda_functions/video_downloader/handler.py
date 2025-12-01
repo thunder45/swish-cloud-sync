@@ -5,6 +5,7 @@ Streams video from cloud provider to S3 using multipart upload for large files.
 Updates DynamoDB with sync status and publishes CloudWatch metrics.
 """
 
+import json
 import os
 import boto3
 import requests
@@ -13,17 +14,20 @@ from typing import Dict, Any
 from aws_xray_sdk.core import xray_recorder
 from cloud_sync_common.logging_utils import get_logger
 from cloud_sync_common.correlation import get_or_create_correlation_id
-from cloud_sync_common.metrics_utils import publish_metric
-from cloud_sync_common.exceptions import TransferError
+from cloud_sync_common.metrics_utils import MetricsPublisher
+from cloud_sync_common.gopro_provider import GoProProvider
+from cloud_sync_common.exceptions import TransferError, APIError
 
 # Initialize AWS clients
 s3_client = boto3.client('s3')
+secrets_client = boto3.client('secretsmanager')
 dynamodb = boto3.resource('dynamodb')
-cloudwatch = boto3.client('cloudwatch')
 logger = get_logger(__name__)
+metrics_publisher = MetricsPublisher(namespace='GoProSync')
 
 # Environment variables
 S3_BUCKET = os.environ.get('S3_BUCKET')
+SECRET_NAME = os.environ.get('SECRET_NAME', 'gopro/credentials')
 DYNAMODB_TABLE = os.environ.get('DYNAMODB_TABLE', 'gopro-sync-tracker')
 MULTIPART_THRESHOLD = int(os.environ.get('MULTIPART_THRESHOLD', '104857600'))  # 100 MB
 CHUNK_SIZE = int(os.environ.get('CHUNK_SIZE', '104857600'))  # 100 MB
@@ -53,23 +57,24 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     start_time = datetime.utcnow()
     
     try:
-        provider = event.get('provider', 'gopro')
+        provider_name = event.get('provider', 'gopro')
         media_id = event['media_id']
         filename = event['filename']
-        download_url = event['download_url']
-        file_size = event['file_size']
-        auth_token = event['auth_token']
+        file_size = event.get('file_size', 0)
         upload_date = event.get('upload_date', '')
         
-        xray_recorder.put_annotation('provider', provider)
+        xray_recorder.put_annotation('provider', provider_name)
         xray_recorder.put_annotation('media_id', media_id)
         xray_recorder.put_annotation('file_size', file_size)
         
         # Get DynamoDB table
         table = dynamodb.Table(DYNAMODB_TABLE)
         
+        # Retrieve credentials from Secrets Manager
+        credentials = retrieve_credentials()
+        
         # Generate S3 key
-        s3_key = generate_s3_key(provider, filename, upload_date)
+        s3_key = generate_s3_key(provider_name, filename, upload_date)
         
         # Check idempotency
         if check_already_uploaded(s3_key, media_id):
@@ -84,23 +89,38 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         
         # Update status to IN_PROGRESS
         update_sync_status(table, media_id, 'IN_PROGRESS', {
-            'provider': provider,
+            'provider': provider_name,
             'filename': filename,
             'file_size': file_size,
             'upload_date': upload_date
         })
         
+        # Get actual download URL using 2-step process
+        logger.info(f'Resolving download URL for {media_id}')
+        provider = GoProProvider()
+        
+        try:
+            actual_download_url = provider.get_download_url(
+                media_id=media_id,
+                cookies=credentials.get('cookies'),
+                user_agent=credentials.get('user-agent'),
+                quality='source'
+            )
+            logger.info(f'Resolved download URL (CloudFront pre-signed)')
+        except APIError as e:
+            logger.error(f'Failed to resolve download URL: {e}')
+            raise TransferError(f'Failed to get download URL: {e}')
+        
         # Download and upload video
         logger.info(f'Starting download for {media_id} ({file_size} bytes)')
         
         result = download_and_upload_video(
-            download_url=download_url,
+            download_url=actual_download_url,
             s3_bucket=S3_BUCKET,
             s3_key=s3_key,
             file_size=file_size,
-            auth_token=auth_token,
             media_id=media_id,
-            provider=provider
+            provider=provider_name
         )
         
         # Calculate transfer metrics
@@ -119,12 +139,18 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         })
         
         # Publish metrics
-        publish_success_metrics(
-            provider=provider,
+        metrics_publisher.record_video_synced(
+            provider=provider_name,
+            environment=os.environ.get('ENVIRONMENT', 'dev'),
             bytes_transferred=result['bytes_transferred'],
-            transfer_duration=transfer_duration,
-            throughput_mbps=throughput_mbps,
-            ttfb=result.get('ttfb', 0)
+            duration_seconds=transfer_duration
+        )
+        
+        # Publish TTFB metric separately
+        metrics_publisher.put_metric(
+            metric_name='TimeToFirstByte',
+            value=result.get('ttfb', 0),
+            unit='Seconds'
         )
         
         logger.info('Video download completed successfully', extra={
@@ -180,7 +206,11 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         })
         
         # Publish failure metric
-        publish_failure_metric(provider, 'HTTPError')
+        metrics_publisher.record_sync_failure(
+            provider=provider_name,
+            environment=os.environ.get('ENVIRONMENT', 'dev'),
+            error_type='HTTPError'
+        )
         
         raise
         
@@ -198,7 +228,11 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         })
         
         # Publish failure metric
-        publish_failure_metric(provider, 'TransferError')
+        metrics_publisher.record_sync_failure(
+            provider=provider_name,
+            environment=os.environ.get('ENVIRONMENT', 'dev'),
+            error_type='TransferError'
+        )
         
         raise
         
@@ -219,9 +253,40 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             pass
         
         # Publish failure metric
-        publish_failure_metric(provider, type(e).__name__)
+        try:
+            metrics_publisher.record_sync_failure(
+                provider=event.get('provider', 'gopro'),
+                environment=os.environ.get('ENVIRONMENT', 'dev'),
+                error_type=type(e).__name__
+            )
+        except:
+            pass
         
         raise
+
+
+@xray_recorder.capture('retrieve_credentials')
+def retrieve_credentials() -> Dict[str, Any]:
+    """
+    Retrieve credentials from AWS Secrets Manager.
+    
+    Returns:
+        Dictionary containing credentials
+        
+    Raises:
+        TransferError: If credentials cannot be retrieved
+    """
+    try:
+        logger.info(f'Retrieving credentials from Secrets Manager: {SECRET_NAME}')
+        
+        response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
+        credentials = json.loads(response['SecretString'])
+        
+        logger.info('Credentials retrieved successfully')
+        return credentials
+        
+    except Exception as e:
+        raise TransferError(f'Failed to retrieve credentials: {str(e)}')
 
 
 def generate_s3_key(provider: str, filename: str, upload_date: str) -> str:
@@ -334,7 +399,6 @@ def download_and_upload_video(
     s3_bucket: str,
     s3_key: str,
     file_size: int,
-    auth_token: str,
     media_id: str,
     provider: str
 ) -> Dict[str, Any]:
@@ -342,11 +406,10 @@ def download_and_upload_video(
     Download video from provider and upload to S3.
     
     Args:
-        download_url: Provider download URL
+        download_url: Pre-signed CloudFront URL (no auth needed)
         s3_bucket: S3 bucket name
         s3_key: S3 object key
-        file_size: Expected file size
-        auth_token: Authentication token
+        file_size: Expected file size (may be 0 if unknown)
         media_id: Media ID
         provider: Provider name
         
@@ -354,17 +417,18 @@ def download_and_upload_video(
         Dictionary with transfer results
     """
     # Decide upload method based on file size
-    if file_size > MULTIPART_THRESHOLD:
+    # If file_size is 0 (unknown), use multipart to be safe
+    if file_size == 0 or file_size > MULTIPART_THRESHOLD:
         logger.info(f'Using multipart upload (file size: {file_size} bytes)')
         return multipart_upload_stream(
             download_url, s3_bucket, s3_key, file_size,
-            auth_token, media_id, provider
+            media_id, provider
         )
     else:
         logger.info(f'Using direct upload (file size: {file_size} bytes)')
         return direct_upload_stream(
             download_url, s3_bucket, s3_key, file_size,
-            auth_token, media_id, provider
+            media_id, provider
         )
 
 
@@ -374,7 +438,6 @@ def direct_upload_stream(
     s3_bucket: str,
     s3_key: str,
     file_size: int,
-    auth_token: str,
     media_id: str,
     provider: str
 ) -> Dict[str, Any]:
@@ -382,22 +445,19 @@ def direct_upload_stream(
     Direct upload for small files.
     
     Args:
-        download_url: Provider download URL
+        download_url: Pre-signed CloudFront URL (no auth needed)
         s3_bucket: S3 bucket name
         s3_key: S3 object key
-        file_size: Expected file size
-        auth_token: Authentication token
+        file_size: Expected file size (may be 0 if unknown)
         media_id: Media ID
         provider: Provider name
         
     Returns:
         Dictionary with transfer results
     """
-    # Start download
-    headers = {'Authorization': f'Bearer {auth_token}'}
-    
-    with xray_recorder.capture('provider_api_download'):
-        response = requests.get(download_url, headers=headers, stream=True, timeout=300)
+    # Start download - CloudFront URLs are pre-signed, no auth needed
+    with xray_recorder.capture('cloudfront_download'):
+        response = requests.get(download_url, stream=True, timeout=300)
         response.raise_for_status()
         
         # Track TTFB
@@ -408,10 +468,10 @@ def direct_upload_stream(
     content = response.content
     bytes_transferred = len(content)
     
-    # Verify size
-    if bytes_transferred != file_size:
-        raise TransferError(
-            f'Size mismatch: expected {file_size}, got {bytes_transferred}'
+    # Verify size if provided
+    if file_size > 0 and bytes_transferred != file_size:
+        logger.warning(
+            f'Size mismatch: expected {file_size}, got {bytes_transferred} - using actual size'
         )
     
     # Upload to S3
@@ -443,7 +503,6 @@ def multipart_upload_stream(
     s3_bucket: str,
     s3_key: str,
     file_size: int,
-    auth_token: str,
     media_id: str,
     provider: str
 ) -> Dict[str, Any]:
@@ -451,11 +510,10 @@ def multipart_upload_stream(
     Multipart upload for large files.
     
     Args:
-        download_url: Provider download URL
+        download_url: Pre-signed CloudFront URL (no auth needed)
         s3_bucket: S3 bucket name
         s3_key: S3 object key
-        file_size: Expected file size
-        auth_token: Authentication token
+        file_size: Expected file size (may be 0 if unknown)
         media_id: Media ID
         provider: Provider name
         
@@ -484,11 +542,9 @@ def multipart_upload_stream(
     ttfb = 0
     
     try:
-        # Start streaming download
-        headers = {'Authorization': f'Bearer {auth_token}'}
-        
-        with xray_recorder.capture('provider_api_download'):
-            response = requests.get(download_url, headers=headers, stream=True, timeout=300)
+        # Start streaming download - CloudFront URLs are pre-signed, no auth needed
+        with xray_recorder.capture('cloudfront_download'):
+            response = requests.get(download_url, stream=True, timeout=300)
             response.raise_for_status()
             
             # Track TTFB
@@ -517,10 +573,10 @@ def multipart_upload_stream(
                 
                 logger.info(f'Uploaded part {part_number - 1}, bytes: {bytes_transferred}')
         
-        # Verify size
-        if bytes_transferred != file_size:
-            raise TransferError(
-                f'Size mismatch: expected {file_size}, got {bytes_transferred}'
+        # Verify size if provided
+        if file_size > 0 and bytes_transferred != file_size:
+            logger.warning(
+                f'Size mismatch: expected {file_size}, got {bytes_transferred} - using actual size'
             )
         
         # Complete multipart upload
@@ -556,61 +612,3 @@ def multipart_upload_stream(
             logger.error(f'Error aborting multipart upload: {str(abort_error)}')
         
         raise
-
-
-def publish_success_metrics(
-    provider: str,
-    bytes_transferred: int,
-    transfer_duration: float,
-    throughput_mbps: float,
-    ttfb: float
-) -> None:
-    """
-    Publish success metrics to CloudWatch.
-    
-    Args:
-        provider: Provider name
-        bytes_transferred: Bytes transferred
-        transfer_duration: Transfer duration in seconds
-        throughput_mbps: Throughput in Mbps
-        ttfb: Time to first byte in seconds
-    """
-    try:
-        publish_metric('VideosSynced', 1, 'Count', provider)
-        publish_metric('BytesTransferred', bytes_transferred, 'Bytes', provider)
-        publish_metric('TransferDuration', transfer_duration, 'Seconds', provider)
-        publish_metric('TransferThroughput', throughput_mbps, 'None', provider)
-        publish_metric('TimeToFirstByte', ttfb, 'Seconds', provider)
-        
-        logger.info('Success metrics published')
-        
-    except Exception as e:
-        logger.error(f'Error publishing metrics: {str(e)}')
-
-
-def publish_failure_metric(provider: str, error_type: str) -> None:
-    """
-    Publish failure metric to CloudWatch.
-    
-    Args:
-        provider: Provider name
-        error_type: Error type
-    """
-    try:
-        cloudwatch.put_metric_data(
-            Namespace='GoProSync',
-            MetricData=[{
-                'MetricName': 'SyncFailures',
-                'Value': 1,
-                'Unit': 'Count',
-                'Dimensions': [
-                    {'Name': 'Provider', 'Value': provider},
-                    {'Name': 'ErrorType', 'Value': error_type}
-                ]
-            }]
-        )
-        
-        logger.info(f'Failure metric published: {error_type}')
-        
-    except Exception as e:
-        logger.error(f'Error publishing failure metric: {str(e)}')

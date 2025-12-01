@@ -211,6 +211,28 @@ class MonitoringConstruct(Construct):
         )
         low_throughput_alarm.add_alarm_action(cw_actions.SnsAction(self.sns_topic))
 
+        # Alarm 8: Secrets Rotation Failure
+        rotation_failure_alarm = cloudwatch.Alarm(
+            self,
+            "SecretsRotationFailureAlarm",
+            alarm_name=f"{self.environment}-GoPro-Secrets-Rotation-Failure",
+            alarm_description="Secrets rotation failed",
+            metric=cloudwatch.Metric(
+                namespace="CloudSync/SecretsRotation",
+                metric_name="RotationFailure",
+                dimensions_map={
+                    "Provider": "gopro"
+                },
+                statistic="Sum",
+                period=Duration.hours(1)
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        rotation_failure_alarm.add_alarm_action(cw_actions.SnsAction(self.sns_topic))
+
     def _create_dashboard(self) -> None:
         """Create CloudWatch dashboard with operational metrics."""
         
@@ -357,10 +379,52 @@ class MonitoringConstruct(Construct):
             height=6
         )
 
+        # Widget 7: Secrets Rotation Status
+        rotation_widget = cloudwatch.GraphWidget(
+            title="Secrets Rotation Status",
+            left=[
+                cloudwatch.Metric(
+                    namespace="CloudSync/SecretsRotation",
+                    metric_name="RotationSuccess",
+                    dimensions_map={
+                        "Provider": "gopro"
+                    },
+                    statistic="Sum",
+                    period=Duration.days(1),
+                    label="Successful Rotations"
+                ),
+                cloudwatch.Metric(
+                    namespace="CloudSync/SecretsRotation",
+                    metric_name="RotationFailure",
+                    dimensions_map={
+                        "Provider": "gopro"
+                    },
+                    statistic="Sum",
+                    period=Duration.days(1),
+                    label="Failed Rotations"
+                )
+            ],
+            right=[
+                cloudwatch.Metric(
+                    namespace="CloudSync/SecretsRotation",
+                    metric_name="RotationDuration",
+                    dimensions_map={
+                        "Provider": "gopro"
+                    },
+                    statistic="Average",
+                    period=Duration.days(1),
+                    label="Rotation Duration (s)"
+                )
+            ],
+            width=12,
+            height=6
+        )
+
         # Add all widgets to dashboard
         dashboard.add_widgets(sync_success_widget, transfer_volume_widget)
         dashboard.add_widgets(throughput_widget, lambda_performance_widget)
         dashboard.add_widgets(error_rate_widget, sfn_executions_widget)
+        dashboard.add_widgets(rotation_widget)
 
     def _create_logs_insights_queries(self) -> None:
         """Create saved CloudWatch Logs Insights queries."""

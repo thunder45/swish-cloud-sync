@@ -223,6 +223,22 @@ After deployment, set up monitoring:
 - [ ] Create CloudWatch dashboard
 - [ ] Configure CloudWatch alarms
 
+## Secrets Rotation Setup (Phase 6)
+
+The secrets rotation system is automatically deployed and configured:
+
+- [ ] Verify secrets rotator Lambda function is deployed
+- [ ] Check EventBridge rule is enabled (monthly schedule)
+- [ ] Review rotation CloudWatch alarms
+- [ ] Test manual rotation:
+  ```bash
+  ./scripts/trigger_rotation.sh dev
+  ```
+- [ ] Verify rotation metrics in CloudWatch dashboard
+- [ ] Configure SNS email subscription for rotation alerts
+
+For detailed information, see [SECRETS_ROTATION.md](SECRETS_ROTATION.md)
+
 ## Troubleshooting
 
 ### Common Issues

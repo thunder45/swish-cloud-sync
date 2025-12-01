@@ -19,6 +19,7 @@ from .vpc_construct import VPCConstruct
 from .lambda_construct import LambdaConstruct
 from .orchestration_construct import OrchestrationConstruct
 from .monitoring_construct import MonitoringConstruct
+from .secrets_rotation_construct import SecretsRotationConstruct
 
 
 class CloudSyncStack(Stack):
@@ -165,6 +166,21 @@ class CloudSyncStack(Stack):
             environment=environment,
         )
 
+        # Create secrets rotation infrastructure (Phase 6)
+        self.secrets_rotation = SecretsRotationConstruct(
+            self,
+            "SecretsRotation",
+            secret_name="gopro/credentials",
+            provider_name="gopro",
+            sns_topic_arn=self.sns_topic.topic_arn,
+            lambda_layer=self.lambda_layer,
+            vpc=self.vpc.vpc if self.vpc else None,
+            security_group=self.vpc.lambda_security_group if self.vpc else None,
+        )
+        
+        # Add rotation DLQ to monitoring
+        self.dlqs["secrets-rotator"] = self.secrets_rotation.dlq
+
         # Stack outputs for observability and operations
         CfnOutput(
             self,
@@ -224,4 +240,12 @@ class CloudSyncStack(Stack):
                 f"?region={self.region}#dashboards:name={environment}-GoPro-Sync-Operations"
             ),
             description="CloudWatch Dashboard URL",
+        )
+
+        CfnOutput(
+            self,
+            "SecretsRotatorFunctionName",
+            value=self.secrets_rotation.rotator_function.function_name,
+            description="Secrets Rotator Lambda Function Name",
+            export_name=f"{environment}-secrets-rotator-function",
         )
