@@ -339,7 +339,7 @@ class LambdaConstruct(Construct):
                 "DYNAMODB_TABLE": self.dynamodb_table_name,
                 "SNS_TOPIC_ARN": self.sns_topic_arn or "",
                 "PAGE_SIZE": "100",
-                "MAX_VIDEOS": "1000",
+                "MAX_VIDEOS": "50",  # Reduced to avoid Step Functions 256KB payload limit
             },
             tracing=lambda_.Tracing.ACTIVE,
             log_retention=logs.RetentionDays.ONE_MONTH,
