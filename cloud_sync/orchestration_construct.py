@@ -292,39 +292,16 @@ class OrchestrationConstruct(Construct):
             result_path="$.summary",
         )
 
-        # Check for failures in download results
-        check_for_failures = sfn.Choice(self, "CheckForFailures")
-
-        # Calculate if there were any failures (statusCode != 200)
-        # Note: This is a simplified check - individual failures are logged in CloudWatch
-        has_failures_condition = sfn.Condition.is_present("$.download_results[?(@.statusCode != 200)]")
-
+        # Always succeed after downloads - individual failures are logged
+        # SNS notifications for critical failures only (token/listing)
         sync_complete = sfn.Succeed(
             self,
             "SyncComplete",
             comment="Sync completed successfully",
         )
 
-        # Notify partial failure (if SNS topic is configured)
+        # Notify critical failure (if SNS topic is configured)
         if self.sns_topic:
-            notify_partial_failure = tasks.SnsPublish(
-                self,
-                "NotifyPartialFailure",
-                topic=self.sns_topic,
-                subject="GoPro Sync Partial Failure",
-                message=sfn.TaskInput.from_object(
-                    {
-                        "execution_id": sfn.JsonPath.string_at("$.summary.execution_id"),
-                        "correlation_id": sfn.JsonPath.string_at("$.summary.correlation_id"),
-                        "total_videos": sfn.JsonPath.number_at("$.summary.total_videos"),
-                        "start_time": sfn.JsonPath.string_at("$.summary.start_time"),
-                        "message": "Sync completed with failures. Check CloudWatch Logs for details.",
-                        "cookie_age_days": sfn.JsonPath.number_at("$.summary.cookie_age_days"),
-                    }
-                ),
-            )
-            notify_partial_failure.next(sync_complete)
-
             notify_critical_failure = tasks.SnsPublish(
                 self,
                 "NotifyCriticalFailure",
@@ -360,13 +337,6 @@ class OrchestrationConstruct(Construct):
                 errors=["States.ALL"],
                 result_path="$.error",
             )
-
-            # For failures after downloads, notify but still complete
-            check_for_failures_definition = (
-                check_for_failures
-                .when(has_failures_condition, notify_partial_failure)
-                .otherwise(sync_complete)
-            )
         else:
             # If no SNS topic, just succeed or fail
             sync_failed = sfn.Fail(
@@ -387,9 +357,6 @@ class OrchestrationConstruct(Construct):
                 result_path="$.error",
             )
 
-            # Simplified - always succeed after downloads
-            check_for_failures_definition = check_for_failures.otherwise(sync_complete)
-
         # Build the state machine flow
         definition = (
             generate_correlation_id
@@ -404,7 +371,7 @@ class OrchestrationConstruct(Construct):
                             sfn.Condition.number_greater_than("$.media.new_count", 0),
                             download_videos_map
                             .next(generate_summary)
-                            .next(check_for_failures_definition),
+                            .next(sync_complete),
                         )
                         .otherwise(no_new_videos)
                     ),

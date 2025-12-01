@@ -128,8 +128,7 @@ class StorageConstruct(Construct):
                 s3.Transition(
                     storage_class=s3.StorageClass.DEEP_ARCHIVE,
                     transition_after=Duration.days(
-                        self.config.s3_lifecycle_standard_days +
-                        self.config.s3_lifecycle_glacier_ir_days
+                        self.config.s3_lifecycle_deep_archive_days
                     )
                 )
             ],
