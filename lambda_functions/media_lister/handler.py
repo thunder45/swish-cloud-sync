@@ -242,24 +242,25 @@ def list_media_from_provider(
         user_agent = credentials.get('user-agent', 
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36')
         
-        # For simplicity, just increase max_results to fetch more videos
-        # and slice to the section we want based on start_page
-        # This is less efficient but easier to implement
-        total_to_fetch = start_page * max_videos
+        # GoPro API uses page-based pagination with 30 items per page
+        # Calculate which API pages to fetch based on our start_page
+        # If start_page=1 (videos 1-50), fetch API pages 1-2 (60 videos)
+        # If start_page=2 (videos 51-100), fetch API pages 3-4 (60 videos)
+        items_per_api_page = 30
+        pages_to_fetch = (max_videos + items_per_api_page - 1) // items_per_api_page  # Ceiling division
+        api_start_page = (start_page - 1) * pages_to_fetch + 1
         
-        # Call provider's list_media method
-        # It starts from page 1 and fetches up to total_to_fetch videos
-        all_fetched = provider.list_media(
+        logger.info(f'Fetching API pages {api_start_page}-{api_start_page + pages_to_fetch - 1} (30 items/page)')
+        
+        # Call provider's list_media method with correct start page
+        # Provider will paginate from api_start_page
+        videos = provider.list_media_with_start_page(
             cookies=cookies,
             user_agent=user_agent,
-            page_size=100,
-            max_results=min(total_to_fetch, 1000)  # Cap at 1000 to avoid issues
+            start_page=api_start_page,
+            page_size=items_per_api_page,
+            max_results=max_videos
         )
-        
-        # Slice to get only the videos for this page
-        start_idx = (start_page - 1) * max_videos
-        end_idx = start_page * max_videos
-        videos = all_fetched[start_idx:end_idx]
         
         # Convert VideoMetadata objects to dictionaries
         video_dicts = []
