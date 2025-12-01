@@ -488,5 +488,120 @@ class GoProProvider(CloudProviderInterface):
             return f"{self.BASE_URL}/media/{media_id}/download"
 
 
+    def list_media_with_start_page(
+        self,
+        cookies: str,
+        user_agent: str,
+        start_page: int,
+        page_size: int = 30,
+        max_results: int = 50
+    ) -> List[VideoMetadata]:
+        """List media starting from specific API page.
+        
+        GoPro API uses page-based pagination with 30 items per page.
+        This method allows starting from any page to implement pagination across executions.
+        
+        Args:
+            cookies: Cookie header string
+            user_agent: User agent string
+            start_page: API page number to start from (1-indexed)
+            page_size: Items per page (API default is 30)
+            max_results: Maximum videos to return
+            
+        Returns:
+            List of VideoMetadata objects
+            
+        Raises:
+            APIError: If API call fails
+        """
+        logger.info(f"Listing media from page {start_page} (max_results={max_results})")
+        
+        videos = []
+        page = start_page
+        pages_needed = (max_results + page_size - 1) // page_size
+        
+        for _ in range(pages_needed):
+            try:
+                headers = {
+                    'Cookie': cookies,
+                    'User-Agent': user_agent,
+                    'Accept': 'application/vnd.gopro.jk.media+json; version=2.0.0',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Referer': 'https://gopro.com/'
+                }
+                
+                params = {
+                    'page': page,
+                    'per_page': page_size,
+                }
+                
+                response = requests.get(
+                    "https://api.gopro.com/media/search",
+                    headers=headers,
+                    params=params,
+                    timeout=60
+                )
+                
+                if response.status_code == 429:
+                    raise APIError("Rate limited", status_code=429)
+                
+                if response.status_code != 200:
+                    raise APIError(
+                        f"Media listing failed: HTTP {response.status_code}",
+                        status_code=response.status_code
+                    )
+                
+                data = response.json()
+                media_items = data.get('_embedded', {}).get('media', [])
+                
+                if not media_items:
+                    logger.info(f"No more items on page {page}")
+                    break
+                
+                # Parse and filter media items
+                for item in media_items:
+                    filename = item.get('filename', '')
+                    
+                    if not filename:
+                        continue
+                    
+                    # Only GoPro camera files (GH*/GO*)
+                    if not (filename.startswith('GH') or filename.startswith('GO')):
+                        continue
+                    
+                    try:
+                        video = self._parse_media_item(item)
+                        videos.append(video)
+                        
+                        if len(videos) >= max_results:
+                            logger.info(f"Reached max_results: {max_results}")
+                            return videos
+                            
+                    except (KeyError, ValueError) as e:
+                        logger.warning(f"Failed to parse item: {e}")
+                        continue
+                
+                # Check pagination info
+                pages_info = data.get('_pages', {})
+                current_page = pages_info.get('current_page', page)
+                total_pages = pages_info.get('total_pages', page)
+                
+                logger.info(f"Page {current_page}/{total_pages}, got {len(media_items)} items")
+                
+                if current_page >= total_pages:
+                    logger.info("Reached last page")
+                    break
+                
+                page += 1
+                
+            except requests.exceptions.Timeout:
+                raise APIError(f"Timeout on page {page}", status_code=408)
+            except requests.exceptions.RequestException as e:
+                raise APIError(f"Network error on page {page}: {e}", status_code=500)
+        
+        logger.info(f"Retrieved {len(videos)} videos from page {start_page}")
+        return videos
+
+
 # Register GoPro provider with factory
 ProviderFactory.register_provider('gopro', GoProProvider)
