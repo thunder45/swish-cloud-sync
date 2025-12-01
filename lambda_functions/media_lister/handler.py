@@ -58,12 +58,15 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Retrieve credentials from Secrets Manager
         credentials = retrieve_credentials()
         
+        # Get pagination state from DynamoDB
+        start_page = get_pagination_state()
+        
         # Create GoPro provider instance
         provider = GoProProvider()
         
-        # List media from provider
-        logger.info('Listing media from GoPro Cloud')
-        all_videos = list_media_from_provider(provider, credentials, MAX_VIDEOS, correlation_id)
+        # List media from provider with pagination
+        logger.info(f'Listing media from GoPro Cloud (page {start_page})')
+        all_videos = list_media_from_provider(provider, credentials, MAX_VIDEOS, correlation_id, start_page)
         
         logger.info(f'Found {len(all_videos)} total videos from provider')
         
@@ -78,6 +81,17 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         new_videos = filter_new_videos(all_videos)
         
         logger.info(f'Found {len(new_videos)} new videos to sync')
+        
+        # Update pagination state if we got a full batch
+        # If we got < MAX_VIDEOS, we've reached the end
+        if len(all_videos) == MAX_VIDEOS:
+            # Advance to next page for next execution
+            update_pagination_state(start_page + 1)
+            logger.info(f'Advanced pagination to page {start_page + 1}')
+        else:
+            # Reset to page 1 (we've processed everything)
+            update_pagination_state(1)
+            logger.info('Reset pagination to page 1 (reached end of library)')
         
         # Calculate duration
         duration = (datetime.utcnow() - start_time).total_seconds()
@@ -201,7 +215,8 @@ def list_media_from_provider(
     provider: GoProProvider,
     credentials: Dict[str, Any],
     max_videos: int,
-    correlation_id: str
+    correlation_id: str,
+    start_page: int = 1
 ) -> List[Dict[str, Any]]:
     """
     List media from GoPro Cloud with pagination and API structure validation.
@@ -211,6 +226,7 @@ def list_media_from_provider(
         credentials: Credentials from Secrets Manager
         max_videos: Maximum number of videos to retrieve
         correlation_id: Correlation ID for tracking
+        start_page: Starting page number (for pagination across executions)
         
     Returns:
         List of video metadata dictionaries
@@ -218,7 +234,7 @@ def list_media_from_provider(
     Raises:
         APIError: If API response structure is unexpected
     """
-    logger.info(f'Listing media from provider (max_videos={max_videos})')
+    logger.info(f'Listing media from provider (max_videos={max_videos}, start_page={start_page})')
     
     try:
         # Extract authentication headers from credentials
@@ -226,14 +242,24 @@ def list_media_from_provider(
         user_agent = credentials.get('user-agent', 
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36')
         
+        # For simplicity, just increase max_results to fetch more videos
+        # and slice to the section we want based on start_page
+        # This is less efficient but easier to implement
+        total_to_fetch = start_page * max_videos
+        
         # Call provider's list_media method
-        # Provider handles pagination and returns VideoMetadata objects
-        videos = provider.list_media(
+        # It starts from page 1 and fetches up to total_to_fetch videos
+        all_fetched = provider.list_media(
             cookies=cookies,
             user_agent=user_agent,
-            page_size=PAGE_SIZE,
-            max_results=max_videos
+            page_size=100,
+            max_results=min(total_to_fetch, 1000)  # Cap at 1000 to avoid issues
         )
+        
+        # Slice to get only the videos for this page
+        start_idx = (start_page - 1) * max_videos
+        end_idx = start_page * max_videos
+        videos = all_fetched[start_idx:end_idx]
         
         # Convert VideoMetadata objects to dictionaries
         video_dicts = []
@@ -414,6 +440,59 @@ def batch_get_sync_status(table: Any, media_ids: List[str]) -> Dict[str, str]:
     logger.info(f'Retrieved {len(sync_statuses)} sync statuses from DynamoDB')
     
     return sync_statuses
+
+
+@xray_recorder.capture('get_pagination_state')
+def get_pagination_state() -> int:
+    """
+    Get current pagination state from DynamoDB.
+    
+    Returns:
+        Current page number (1-indexed)
+    """
+    table = dynamodb.Table(DYNAMODB_TABLE)
+    
+    try:
+        response = table.get_item(
+            Key={'media_id': '_pagination_state'},
+            ProjectionExpression='current_page'
+        )
+        
+        item = response.get('Item', {})
+        page = item.get('current_page', 1)
+        
+        logger.info(f'Retrieved pagination state: page {page}')
+        return int(page)
+        
+    except Exception as e:
+        logger.warning(f'Error reading pagination state: {str(e)}, defaulting to page 1')
+        return 1
+
+
+@xray_recorder.capture('update_pagination_state')
+def update_pagination_state(page: int) -> None:
+    """
+    Update pagination state in DynamoDB.
+    
+    Args:
+        page: Next page number
+    """
+    table = dynamodb.Table(DYNAMODB_TABLE)
+    
+    try:
+        table.put_item(
+            Item={
+                'media_id': '_pagination_state',
+                'current_page': page,
+                'updated_at': datetime.utcnow().isoformat() + 'Z'
+            }
+        )
+        
+        logger.info(f'Updated pagination state to page {page}')
+        
+    except Exception as e:
+        logger.error(f'Error updating pagination state: {str(e)}', exc_info=True)
+        # Don't fail the entire execution for pagination state update
 
 
 def publish_api_structure_alert(message: str, correlation_id: str, response_sample: str = None) -> None:
