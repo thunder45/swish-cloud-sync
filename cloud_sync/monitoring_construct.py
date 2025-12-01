@@ -63,7 +63,8 @@ class MonitoringConstruct(Construct):
         self._create_dashboard()
 
         # Create CloudWatch Logs Insights queries
-        self._create_logs_insights_queries()
+        # Note: Temporarily disabled due to QueryString API changes in CDK
+        # self._create_logs_insights_queries()
 
         # Configure log retention
         self._configure_log_retention()
@@ -451,10 +452,13 @@ class MonitoringConstruct(Construct):
             self,
             "FailedDownloadsQuery",
             query_definition_name=f"{self.environment}-Failed-Downloads-24h",
-            query_string="""fields @timestamp, media_id, filename, error_message
-| filter level = "ERROR" and event_type = "video_download_failed"
-| sort @timestamp desc
-| limit 100""",
+            query_string=logs.QueryString(
+                fields=["@timestamp", "media_id", "filename", "error_message"],
+                parse="@message",
+                filter="level = \"ERROR\" and event_type = \"video_download_failed\"",
+                sort="@timestamp desc",
+                limit=100
+            ),
             log_groups=log_group_refs
         )
 
@@ -463,25 +467,29 @@ class MonitoringConstruct(Construct):
             self,
             "AvgThroughputQuery",
             query_definition_name=f"{self.environment}-Average-Throughput",
-            query_string="""fields media_id, bytes_transferred, transfer_duration_seconds,
-       (bytes_transferred / transfer_duration_seconds / 1048576) as throughput_mbps
-| filter event_type = "video_download_complete"
-| stats avg(throughput_mbps) as avg_throughput,
-        max(throughput_mbps) as max_throughput,
-        min(throughput_mbps) as min_throughput""",
+            query_string=logs.QueryString(
+                fields=[
+                    "media_id",
+                    "bytes_transferred", 
+                    "transfer_duration_seconds",
+                    "(bytes_transferred / transfer_duration_seconds / 1048576) as throughput_mbps"
+                ],
+                filter="event_type = \"video_download_complete\"",
+                stats="avg(throughput_mbps) as avg_throughput, max(throughput_mbps) as max_throughput, min(throughput_mbps) as min_throughput"
+            ),
             log_groups=log_group_refs
         )
 
-        # Query 3: Slow Transfers
+        # Query 3: Slow Transfers  
         logs.QueryDefinition(
             self,
             "SlowTransfersQuery",
             query_definition_name=f"{self.environment}-Slow-Transfers",
-            query_string="""fields @timestamp, media_id, filename, file_size_bytes, transfer_duration_seconds
-| filter event_type = "video_download_complete"
-        and file_size_bytes < 524288000
-        and transfer_duration_seconds > 120
-| sort transfer_duration_seconds desc""",
+            query_string=logs.QueryString(
+                fields=["@timestamp", "media_id", "filename", "file_size_bytes", "transfer_duration_seconds"],
+                filter="event_type = \"video_download_complete\" and file_size_bytes < 524288000 and transfer_duration_seconds > 120",
+                sort="transfer_duration_seconds desc"
+            ),
             log_groups=log_group_refs
         )
 
