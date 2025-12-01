@@ -49,7 +49,7 @@ ENVIRONMENTS: Dict[str, EnvironmentConfig] = {
         dynamodb_billing_mode='PAY_PER_REQUEST',
         s3_lifecycle_standard_days=7,
         s3_lifecycle_glacier_ir_days=7,
-        s3_lifecycle_deep_archive_days=14,
+        s3_lifecycle_deep_archive_days=97,  # Must be 90+ days after GLACIER_IR (7+90=97)
         step_functions_timeout_seconds=7200,  # 2 hours
         step_functions_max_concurrency=2,
         enable_xray=True,
@@ -65,7 +65,7 @@ ENVIRONMENTS: Dict[str, EnvironmentConfig] = {
         dynamodb_billing_mode='PAY_PER_REQUEST',
         s3_lifecycle_standard_days=7,
         s3_lifecycle_glacier_ir_days=7,
-        s3_lifecycle_deep_archive_days=14,
+        s3_lifecycle_deep_archive_days=97,  # Must be 90+ days after GLACIER_IR (7+90=97)
         step_functions_timeout_seconds=7200,
         step_functions_max_concurrency=5,
         enable_xray=True,
@@ -81,7 +81,7 @@ ENVIRONMENTS: Dict[str, EnvironmentConfig] = {
         dynamodb_billing_mode='PAY_PER_REQUEST',
         s3_lifecycle_standard_days=7,
         s3_lifecycle_glacier_ir_days=7,
-        s3_lifecycle_deep_archive_days=14,
+        s3_lifecycle_deep_archive_days=97,  # Must be 90+ days after GLACIER_IR (7+90=97)
         step_functions_timeout_seconds=43200,  # 12 hours
         step_functions_max_concurrency=5,
         enable_xray=True,
