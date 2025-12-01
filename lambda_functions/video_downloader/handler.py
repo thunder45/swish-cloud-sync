@@ -11,6 +11,7 @@ import boto3
 import requests
 from datetime import datetime
 from typing import Dict, Any
+from decimal import Decimal
 from aws_xray_sdk.core import xray_recorder
 from cloud_sync_common.logging_utils import get_logger
 from cloud_sync_common.correlation import get_or_create_correlation_id
@@ -128,13 +129,13 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         transfer_duration = (end_time - start_time).total_seconds()
         throughput_mbps = (result['bytes_transferred'] * 8) / (transfer_duration * 1_000_000)
         
-        # Update status to COMPLETED
+        # Update status to COMPLETED (convert floats to Decimal for DynamoDB)
         update_sync_status(table, media_id, 'COMPLETED', {
             's3_key': s3_key,
             's3_etag': result.get('etag', ''),
             'sync_timestamp': end_time.isoformat() + 'Z',
-            'transfer_duration': transfer_duration,
-            'throughput_mbps': throughput_mbps,
+            'transfer_duration': Decimal(str(round(transfer_duration, 2))),
+            'throughput_mbps': Decimal(str(round(throughput_mbps, 2))),
             'bytes_transferred': result['bytes_transferred']
         })
         
