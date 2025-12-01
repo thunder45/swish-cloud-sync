@@ -101,6 +101,13 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         }
         
     except TokenExpiredError as e:
+        # Calculate cookie age even on failure
+        try:
+            credentials = retrieve_credentials()
+            cookie_age_days = calculate_cookie_age(credentials)
+        except:
+            cookie_age_days = 999.0  # Unknown age
+        
         logger.error(f'Tokens expired: {str(e)}', extra={
             'error_type': 'TokenExpiredError',
             'correlation_id': correlation_id
@@ -119,12 +126,20 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return {
             'statusCode': 401,
             'valid': False,
+            'cookie_age_days': cookie_age_days,
             'error': 'TokenExpiredError',
             'message': str(e),
             'correlation_id': correlation_id
         }
         
     except Exception as e:
+        # Calculate cookie age even on failure
+        try:
+            credentials = retrieve_credentials()
+            cookie_age_days = calculate_cookie_age(credentials)
+        except:
+            cookie_age_days = 999.0  # Unknown age
+        
         logger.error(f'Validation error: {str(e)}', extra={
             'error_type': type(e).__name__,
             'correlation_id': correlation_id
@@ -140,6 +155,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return {
             'statusCode': 500,
             'valid': False,
+            'cookie_age_days': cookie_age_days,
             'error': type(e).__name__,
             'message': str(e),
             'correlation_id': correlation_id
