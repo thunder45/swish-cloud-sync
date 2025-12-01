@@ -98,7 +98,7 @@ class OrchestrationConstruct(Construct):
 
         # ===== STATE DEFINITIONS =====
         
-        # Generate correlation ID at start of execution
+        # Generate correlation ID and initialize pagination at start
         generate_correlation_id = sfn.Pass(
             self,
             "GenerateCorrelationId",
@@ -107,6 +107,8 @@ class OrchestrationConstruct(Construct):
                 "execution_id.$": "$$.Execution.Id",
                 "start_time.$": "$$.Execution.StartTime",
                 "provider": "gopro",
+                "current_page": 1,  # Initialize page counter
+                "total_synced": 0,  # Track total videos synced
             },
             result_path="$.context",
         )
@@ -150,7 +152,7 @@ class OrchestrationConstruct(Construct):
             cause="Cookies are invalid or expired. Manual refresh required.",
         )
 
-        # List media from GoPro (no auth parameters needed - Lambda gets from Secrets Manager)
+        # List media from GoPro with current page
         list_media_task = tasks.LambdaInvoke(
             self,
             "ListMedia",
@@ -159,6 +161,7 @@ class OrchestrationConstruct(Construct):
                 {
                     "provider": "gopro",
                     "correlation_id.$": "$.context.correlation_id",
+                    "page_number.$": "$.context.current_page",  # Pass current page
                 }
             ),
             result_path="$.media",
@@ -275,7 +278,22 @@ class OrchestrationConstruct(Construct):
         )
         download_videos_map.iterator(download_video_task)
 
-        # Generate summary of execution
+        # Increment page counter after downloads
+        increment_page = sfn.Pass(
+            self,
+            "IncrementPage",
+            parameters={
+                "correlation_id.$": "$.context.correlation_id",
+                "execution_id.$": "$.context.execution_id",
+                "start_time.$": "$.context.start_time",
+                "provider": "gopro",
+                "current_page.$": "States.MathAdd($.context.current_page, 1)",
+                "total_synced.$": "States.MathAdd($.context.total_synced, $.media.new_count)",
+            },
+            result_path="$.context",
+        )
+        
+        # Generate final summary
         generate_summary = sfn.Pass(
             self,
             "GenerateSummary",
@@ -283,10 +301,7 @@ class OrchestrationConstruct(Construct):
                 "execution_id.$": "$.context.execution_id",
                 "correlation_id.$": "$.context.correlation_id",
                 "start_time.$": "$.context.start_time",
-                "total_videos.$": "$.media.new_count",
-                "total_found.$": "$.media.total_found",
-                "already_synced.$": "$.media.already_synced",
-                "download_results.$": "$.download_results",
+                "total_synced.$": "$.context.total_synced",
                 "cookie_age_days.$": "$.validation.cookie_age_days",
             },
             result_path="$.summary",
@@ -357,7 +372,7 @@ class OrchestrationConstruct(Construct):
                 result_path="$.error",
             )
 
-        # Build the state machine flow
+        # Build the state machine flow with loop
         definition = (
             generate_correlation_id
             .next(validate_tokens_task)
@@ -370,10 +385,10 @@ class OrchestrationConstruct(Construct):
                         .when(
                             sfn.Condition.number_greater_than("$.media.new_count", 0),
                             download_videos_map
-                            .next(generate_summary)
-                            .next(sync_complete),
+                            .next(increment_page)
+                            .next(list_media_task),  # Loop back to list next page
                         )
-                        .otherwise(no_new_videos)
+                        .otherwise(generate_summary.next(sync_complete))  # No more new videos, finish
                     ),
                 )
                 .otherwise(tokens_invalid)
