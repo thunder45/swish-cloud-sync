@@ -59,25 +59,70 @@ def get_dynamodb_records() -> list:
 
 
 def clean_dynamodb(s3_keys: Set[str], dynamodb_records: list):
-    """Remove DynamoDB records that don't have corresponding S3 files."""
+    """Remove DynamoDB records that don't have corresponding S3 files.
+    
+    S3 is the source of truth (796 files). DynamoDB should match exactly.
+    - Remove records marked COMPLETED without S3 files
+    - Remove duplicate records pointing to same S3 file
+    - Keep only ONE record per S3 file
+    """
     
     records_to_delete = []
+    completed_with_s3 = []
+    completed_without_s3 = []
+    s3_key_to_records = {}  # Track which records point to each S3 key
     
     for record in dynamodb_records:
         media_id = record['media_id']
         status = record.get('status', '')
         s3_key = record.get('s3_key', '')
         
-        # If status is COMPLETED but no S3 file, mark for deletion
-        if status == 'COMPLETED' and s3_key and s3_key not in s3_keys:
-            records_to_delete.append({
-                'media_id': media_id,
-                's3_key': s3_key,
-                'status': status
-            })
+        if status == 'COMPLETED':
+            if s3_key:
+                if s3_key in s3_keys:
+                    # Track all records pointing to this S3 key
+                    if s3_key not in s3_key_to_records:
+                        s3_key_to_records[s3_key] = []
+                    s3_key_to_records[s3_key].append(media_id)
+                    completed_with_s3.append(media_id)
+                else:
+                    # COMPLETED but S3 file missing - mark for deletion
+                    records_to_delete.append({
+                        'media_id': media_id,
+                        's3_key': s3_key,
+                        'status': status,
+                        'reason': 'S3_FILE_MISSING'
+                    })
+                    completed_without_s3.append(s3_key)
+            else:
+                # COMPLETED but no s3_key recorded - mark for deletion
+                records_to_delete.append({
+                    'media_id': media_id,
+                    's3_key': 'NONE',
+                    'status': status,
+                    'reason': 'NO_S3_KEY'
+                })
     
-    print(f"\nFound {len(records_to_delete)} records to clean up:")
-    print(f"  - COMPLETED in DynamoDB but missing in S3: {len(records_to_delete)}")
+    # Find duplicates - multiple DynamoDB records for same S3 file
+    duplicates = []
+    for s3_key, media_ids in s3_key_to_records.items():
+        if len(media_ids) > 1:
+            # Keep the first, delete the rest
+            for media_id in media_ids[1:]:
+                records_to_delete.append({
+                    'media_id': media_id,
+                    's3_key': s3_key,
+                    'status': 'COMPLETED',
+                    'reason': 'DUPLICATE_S3_KEY'
+                })
+                duplicates.append(f"{media_id} -> {s3_key}")
+    
+    print(f"\nDynamoDB Analysis:")
+    print(f"  - Total S3 files: {len(s3_keys)}")
+    print(f"  - COMPLETED records: {len(completed_with_s3)}")
+    print(f"  - COMPLETED WITHOUT S3 file: {len(completed_without_s3)}")
+    print(f"  - Duplicate records (same S3 key): {len(duplicates)}")
+    print(f"  - Records to delete: {len(records_to_delete)}")
     
     if not records_to_delete:
         print("\n✅ DynamoDB is already in sync with S3")
