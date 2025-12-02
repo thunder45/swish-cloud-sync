@@ -336,7 +336,7 @@ class LambdaConstruct(Construct):
             timeout=Duration.minutes(5),
             environment={
                 "SECRET_NAME": "gopro/credentials",
-                "DYNAMODB_TABLE": self.dynamodb_table_name,
+                "DYNAMODB_TABLE": self.dynamodb_table_name,  # Uses actual table name with -dev suffix
                 "SNS_TOPIC_ARN": self.sns_topic_arn or "",
                 "PAGE_SIZE": "30",  # Match GoPro API page size
                 "MAX_VIDEOS": "100",  # Maximum videos per page to download
