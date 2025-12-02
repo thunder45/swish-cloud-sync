@@ -95,18 +95,39 @@ class MonitoringConstruct(Construct):
         )
         high_failure_alarm.add_alarm_action(cw_actions.SnsAction(self.sns_topic))
 
-        # Alarm 2: Authentication Failure (custom metric)
-        auth_failure_alarm = cloudwatch.Alarm(
+        # Alarm 2: Token Expiration
+        token_expired_alarm = cloudwatch.Alarm(
             self,
-            "AuthFailureAlarm",
-            alarm_name=f"{self.environment}-GoPro-Auth-Failure",
-            alarm_description="Authentication failure detected",
+            "TokenExpiredAlarm",
+            alarm_name=f"{self.environment}-GoPro-Token-Expired",
+            alarm_description="GoPro token has expired - manual refresh required",
             metric=cloudwatch.Metric(
-                namespace=self.namespace,
-                metric_name="AuthenticationFailure",
+                namespace="CloudSync/TokenValidation",
+                metric_name="TokenExpired",
                 dimensions_map={
-                    "Provider": "gopro",
-                    "Environment": self.environment
+                    "Provider": "gopro"
+                },
+                statistic="Sum",
+                period=Duration.minutes(5)
+            ),
+            threshold=0,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        token_expired_alarm.add_alarm_action(cw_actions.SnsAction(self.sns_topic))
+
+        # Alarm 3: Token Validation Failure
+        token_validation_alarm = cloudwatch.Alarm(
+            self,
+            "TokenValidationFailureAlarm",
+            alarm_name=f"{self.environment}-GoPro-Token-Validation-Failure",
+            alarm_description="Token validation failed - check token health",
+            metric=cloudwatch.Metric(
+                namespace="CloudSync/TokenValidation",
+                metric_name="ValidationFailure",
+                dimensions_map={
+                    "Provider": "gopro"
                 },
                 statistic="Sum",
                 period=Duration.minutes(5)
@@ -116,9 +137,31 @@ class MonitoringConstruct(Construct):
             comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
-        auth_failure_alarm.add_alarm_action(cw_actions.SnsAction(self.sns_topic))
+        token_validation_alarm.add_alarm_action(cw_actions.SnsAction(self.sns_topic))
 
-        # Alarm 3: Lambda Errors (for each Lambda function)
+        # Alarm 4: API Structure Validation Failure
+        api_structure_alarm = cloudwatch.Alarm(
+            self,
+            "APIStructureFailureAlarm",
+            alarm_name=f"{self.environment}-GoPro-API-Structure-Failure",
+            alarm_description="API response structure changed - code update may be needed",
+            metric=cloudwatch.Metric(
+                namespace="CloudSync/MediaListing",
+                metric_name="APIStructureChangeDetected",
+                dimensions_map={
+                    "Provider": "gopro"
+                },
+                statistic="Sum",
+                period=Duration.minutes(15)
+            ),
+            threshold=3,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        api_structure_alarm.add_alarm_action(cw_actions.SnsAction(self.sns_topic))
+
+        # Alarm 5: Lambda Errors (for each Lambda function)
         for function_name, function in self.lambda_functions.items():
             lambda_error_alarm = cloudwatch.Alarm(
                 self,
@@ -136,7 +179,7 @@ class MonitoringConstruct(Construct):
             )
             lambda_error_alarm.add_alarm_action(cw_actions.SnsAction(self.sns_topic))
 
-        # Alarm 4: Lambda Throttles (for each Lambda function)
+        # Alarm 6: Lambda Throttles (for each Lambda function)
         for function_name, function in self.lambda_functions.items():
             lambda_throttle_alarm = cloudwatch.Alarm(
                 self,
@@ -154,7 +197,7 @@ class MonitoringConstruct(Construct):
             )
             lambda_throttle_alarm.add_alarm_action(cw_actions.SnsAction(self.sns_topic))
 
-        # Alarm 5: Step Functions Failures
+        # Alarm 7: Step Functions Failures
         sfn_failure_alarm = cloudwatch.Alarm(
             self,
             "StepFunctionFailureAlarm",
@@ -171,7 +214,7 @@ class MonitoringConstruct(Construct):
         )
         sfn_failure_alarm.add_alarm_action(cw_actions.SnsAction(self.sns_topic))
 
-        # Alarm 6: DLQ Messages (for each DLQ)
+        # Alarm 8: DLQ Messages (for each DLQ)
         for dlq_name, dlq in self.dlqs.items():
             dlq_alarm = cloudwatch.Alarm(
                 self,
@@ -189,7 +232,7 @@ class MonitoringConstruct(Construct):
             )
             dlq_alarm.add_alarm_action(cw_actions.SnsAction(self.sns_topic))
 
-        # Alarm 7: Low Throughput (custom metric)
+        # Alarm 9: Low Throughput (custom metric)
         low_throughput_alarm = cloudwatch.Alarm(
             self,
             "LowThroughputAlarm",
@@ -212,7 +255,7 @@ class MonitoringConstruct(Construct):
         )
         low_throughput_alarm.add_alarm_action(cw_actions.SnsAction(self.sns_topic))
 
-        # Alarm 8: Secrets Rotation Failure
+        # Alarm 10: Secrets Rotation Failure
         rotation_failure_alarm = cloudwatch.Alarm(
             self,
             "SecretsRotationFailureAlarm",
@@ -380,7 +423,58 @@ class MonitoringConstruct(Construct):
             height=6
         )
 
-        # Widget 7: Secrets Rotation Status
+        # Widget 7: Token Health
+        token_health_widget = cloudwatch.GraphWidget(
+            title="Token Health",
+            left=[
+                cloudwatch.Metric(
+                    namespace="CloudSync/TokenValidation",
+                    metric_name="ValidationSuccess",
+                    dimensions_map={
+                        "Provider": "gopro"
+                    },
+                    statistic="Sum",
+                    period=Duration.hours(1),
+                    label="Successful Validations"
+                ),
+                cloudwatch.Metric(
+                    namespace="CloudSync/TokenValidation",
+                    metric_name="ValidationFailure",
+                    dimensions_map={
+                        "Provider": "gopro"
+                    },
+                    statistic="Sum",
+                    period=Duration.hours(1),
+                    label="Failed Validations"
+                ),
+                cloudwatch.Metric(
+                    namespace="CloudSync/TokenValidation",
+                    metric_name="TokenExpired",
+                    dimensions_map={
+                        "Provider": "gopro"
+                    },
+                    statistic="Sum",
+                    period=Duration.hours(1),
+                    label="Token Expirations"
+                )
+            ],
+            right=[
+                cloudwatch.Metric(
+                    namespace="CloudSync/TokenValidation",
+                    metric_name="CookieAgeDays",
+                    dimensions_map={
+                        "Provider": "gopro"
+                    },
+                    statistic="Maximum",
+                    period=Duration.hours(1),
+                    label="Cookie Age (days)"
+                )
+            ],
+            width=12,
+            height=6
+        )
+
+        # Widget 8: Secrets Rotation Status
         rotation_widget = cloudwatch.GraphWidget(
             title="Secrets Rotation Status",
             left=[
@@ -421,10 +515,62 @@ class MonitoringConstruct(Construct):
             height=6
         )
 
+        # Widget 9: Media Listing Metrics
+        media_listing_widget = cloudwatch.GraphWidget(
+            title="Media Listing Metrics",
+            left=[
+                cloudwatch.Metric(
+                    namespace="CloudSync/MediaListing",
+                    metric_name="MediaListedFromProvider",
+                    dimensions_map={
+                        "Provider": "gopro"
+                    },
+                    statistic="Sum",
+                    period=Duration.hours(1),
+                    label="Videos Listed"
+                ),
+                cloudwatch.Metric(
+                    namespace="CloudWatch/MediaListing",
+                    metric_name="NewVideosFound",
+                    dimensions_map={
+                        "Provider": "gopro"
+                    },
+                    statistic="Sum",
+                    period=Duration.hours(1),
+                    label="New Videos Found"
+                ),
+                cloudwatch.Metric(
+                    namespace="CloudSync/MediaListing",
+                    metric_name="APIStructureChangeDetected",
+                    dimensions_map={
+                        "Provider": "gopro"
+                    },
+                    statistic="Sum",
+                    period=Duration.hours(1),
+                    label="API Structure Warnings"
+                )
+            ],
+            right=[
+                cloudwatch.Metric(
+                    namespace="CloudSync/MediaListing",
+                    metric_name="ListingDuration",
+                    dimensions_map={
+                        "Provider": "gopro"
+                    },
+                    statistic="Average",
+                    period=Duration.hours(1),
+                    label="Listing Duration (s)"
+                )
+            ],
+            width=12,
+            height=6
+        )
+
         # Add all widgets to dashboard
         dashboard.add_widgets(sync_success_widget, transfer_volume_widget)
         dashboard.add_widgets(throughput_widget, lambda_performance_widget)
         dashboard.add_widgets(error_rate_widget, sfn_executions_widget)
+        dashboard.add_widgets(token_health_widget, media_listing_widget)
         dashboard.add_widgets(rotation_widget)
 
     def _create_logs_insights_queries(self) -> None:
