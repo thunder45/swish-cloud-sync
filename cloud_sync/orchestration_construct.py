@@ -294,6 +294,21 @@ class OrchestrationConstruct(Construct):
             result_path="$.context",
         )
         
+        # Increment page counter when no new videos (skip downloads)
+        increment_page_no_downloads = sfn.Pass(
+            self,
+            "IncrementPageNoDownloads",
+            parameters={
+                "correlation_id.$": "$.context.correlation_id",
+                "execution_id.$": "$.context.execution_id",
+                "start_time.$": "$.context.start_time",
+                "provider": "gopro",
+                "current_page.$": "States.MathAdd($.context.current_page, 1)",
+                "total_synced.$": "$.context.total_synced",  # No new videos, don't increment
+            },
+            result_path="$.context",
+        )
+        
         # Generate final summary for completed pagination
         generate_summary_complete = sfn.Pass(
             self,
@@ -389,8 +404,11 @@ class OrchestrationConstruct(Construct):
                 result_path="$.error",
             )
 
-        # Check if more pages to process
-        check_more_pages = sfn.Choice(self, "CheckMorePages")
+        # Check if more pages to process (after downloads)
+        check_more_pages_after_downloads = sfn.Choice(self, "CheckMorePagesAfterDownloads")
+        
+        # Check if more pages to process (no downloads)
+        check_more_pages_no_downloads = sfn.Choice(self, "CheckMorePagesNoDownloads")
         
         # Build the state machine flow with loop
         definition = (
@@ -407,7 +425,7 @@ class OrchestrationConstruct(Construct):
                             download_videos_map
                             .next(increment_page)
                             .next(
-                                check_more_pages
+                                check_more_pages_after_downloads
                                 .when(
                                     sfn.Condition.number_less_than_json_path(
                                         "$.context.current_page",
@@ -418,7 +436,20 @@ class OrchestrationConstruct(Construct):
                                 .otherwise(generate_summary_complete.next(sync_complete))  # Reached last page
                             )
                         )
-                        .otherwise(generate_summary_no_videos.next(sync_complete))  # No new videos on this page
+                        .otherwise(
+                            # No new videos on this page, but check more pages
+                            increment_page_no_downloads.next(
+                                check_more_pages_no_downloads
+                                .when(
+                                    sfn.Condition.number_less_than_json_path(
+                                        "$.context.current_page",
+                                        "$.media.pagination.total_pages"
+                                    ),
+                                    list_media_task  # Loop back to list next page
+                                )
+                                .otherwise(generate_summary_no_videos.next(sync_complete))  # No new videos, reached last page
+                            )
+                        )
                     ),
                 )
                 .otherwise(tokens_invalid)
