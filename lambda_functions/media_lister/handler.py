@@ -66,9 +66,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         
         # List media from provider for this specific page
         logger.info(f'Listing media from GoPro Cloud (page {page_number})')
-        all_videos = list_media_from_provider(provider, credentials, MAX_VIDEOS, correlation_id, page_number)
+        all_videos, pagination = list_media_from_provider(provider, credentials, MAX_VIDEOS, correlation_id, page_number)
         
         logger.info(f'Found {len(all_videos)} total videos from provider (page {page_number})')
+        logger.info(f'Pagination metadata: {pagination}')
         
         # Publish metric
         metrics_publisher.put_metric(
@@ -104,7 +105,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             }
         ])
         
-        # Return response
+        # Return response with pagination metadata
         response = {
             'statusCode': 200,
             'provider': 'gopro',
@@ -113,7 +114,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             'new_count': len(new_videos),
             'already_synced': len(all_videos) - len(new_videos),
             'duration_seconds': duration,
-            'correlation_id': correlation_id
+            'correlation_id': correlation_id,
+            'pagination': pagination
         }
         
         logger.info('Media listing completed successfully', extra={
@@ -206,7 +208,7 @@ def list_media_from_provider(
     max_videos: int,
     correlation_id: str,
     page_number: int = 1
-) -> List[Dict[str, Any]]:
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     List media from GoPro Cloud for a single API page.
     
@@ -218,7 +220,7 @@ def list_media_from_provider(
         page_number: API page number (1-indexed, 30 items per page)
         
     Returns:
-        List of video metadata dictionaries for this page
+        Tuple of (List of video metadata dictionaries for this page, pagination metadata)
         
     Raises:
         APIError: If API response structure is unexpected
@@ -232,13 +234,12 @@ def list_media_from_provider(
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36')
         
         # Call provider to get a single page (30 items)
-        # We get 30 from API but return up to MAX_VIDEOS (50)
-        # So we fetch 2 pages to ensure we have enough
-        videos = provider.list_media_with_start_page(
+        # We get 30 from API but return up to MAX_VIDEOS
+        videos, pagination = provider.list_media_with_start_page(
             cookies=cookies,
             user_agent=user_agent,
             start_page=page_number,
-            page_size=30,
+            page_size=PAGE_SIZE,
             max_results=MAX_VIDEOS
         )
         
@@ -268,7 +269,7 @@ def list_media_from_provider(
         
         logger.info(f'Retrieved and validated {len(video_dicts)} videos from provider')
         
-        return video_dicts
+        return video_dicts, pagination
         
     except APIError:
         # Re-raise API errors (already handled by provider)

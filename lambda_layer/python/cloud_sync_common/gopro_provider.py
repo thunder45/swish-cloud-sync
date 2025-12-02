@@ -495,7 +495,7 @@ class GoProProvider(CloudProviderInterface):
         start_page: int,
         page_size: int = 30,
         max_results: int = 50
-    ) -> List[VideoMetadata]:
+    ) -> tuple[List[VideoMetadata], Dict[str, Any]]:
         """List media starting from specific API page.
         
         GoPro API uses page-based pagination with 30 items per page.
@@ -509,7 +509,7 @@ class GoProProvider(CloudProviderInterface):
             max_results: Maximum videos to return
             
         Returns:
-            List of VideoMetadata objects
+            Tuple of (List of VideoMetadata objects, pagination metadata dict)
             
         Raises:
             APIError: If API call fails
@@ -519,6 +519,7 @@ class GoProProvider(CloudProviderInterface):
         videos = []
         page = start_page
         pages_needed = (max_results + page_size - 1) // page_size
+        pagination_metadata = {}
         
         for _ in range(pages_needed):
             try:
@@ -585,8 +586,18 @@ class GoProProvider(CloudProviderInterface):
                 pages_info = data.get('_pages', {})
                 current_page = pages_info.get('current_page', page)
                 total_pages = pages_info.get('total_pages', page)
+                total_items = pages_info.get('total_items', 0)
+                per_page = pages_info.get('per_page', page_size)
                 
-                logger.info(f"Page {current_page}/{total_pages}, got {len(media_items)} items")
+                # Store pagination metadata from API response
+                pagination_metadata = {
+                    'current_page': current_page,
+                    'total_pages': total_pages,
+                    'total_items': total_items,
+                    'per_page': per_page
+                }
+                
+                logger.info(f"Page {current_page}/{total_pages}, got {len(media_items)} items, {total_items} total items")
                 
                 if current_page >= total_pages:
                     logger.info("Reached last page")
@@ -600,7 +611,8 @@ class GoProProvider(CloudProviderInterface):
                 raise APIError(f"Network error on page {page}: {e}", status_code=500)
         
         logger.info(f"Retrieved {len(videos)} videos from page {start_page}")
-        return videos
+        logger.info(f"Pagination: {pagination_metadata}")
+        return videos, pagination_metadata
 
 
 # Register GoPro provider with factory

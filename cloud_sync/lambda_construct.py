@@ -338,8 +338,8 @@ class LambdaConstruct(Construct):
                 "SECRET_NAME": "gopro/credentials",
                 "DYNAMODB_TABLE": self.dynamodb_table_name,
                 "SNS_TOPIC_ARN": self.sns_topic_arn or "",
-                "PAGE_SIZE": "100",
-                "MAX_VIDEOS": "50",  # Reduced to avoid Step Functions 256KB payload limit
+                "PAGE_SIZE": "30",  # Match GoPro API page size
+                "MAX_VIDEOS": "100",  # Maximum videos per page to download
             },
             tracing=lambda_.Tracing.ACTIVE,
             log_retention=logs.RetentionDays.ONE_MONTH,
