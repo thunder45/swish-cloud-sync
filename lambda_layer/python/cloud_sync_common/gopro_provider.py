@@ -576,7 +576,7 @@ class GoProProvider(CloudProviderInterface):
                         
                         if len(videos) >= max_results:
                             logger.info(f"Reached max_results: {max_results}")
-                            return videos
+                            return videos, pagination_metadata
                             
                     except (KeyError, ValueError) as e:
                         logger.warning(f"Failed to parse item: {e}")
