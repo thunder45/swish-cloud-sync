@@ -67,7 +67,13 @@ while True:
             gopro_files.append({
                 'filename': filename,
                 'media_id': media_id,
-                'type': 'video' if filename.lower().endswith('.mp4') else 'photo' if filename.lower().endswith('.jpg') else 'other'
+                'type': 'video' if filename.lower().endswith('.mp4') else 'photo' if filename.lower().endswith('.jpg') else 'other',
+                'file_size': item.get('file_size', 0),
+                'created_at': item.get('created_at', ''),
+                'captured_at': item.get('captured_at', ''),
+                'duration': item.get('duration', 0),
+                'width': item.get('width', 0),
+                'height': item.get('height', 0)
             })
         else:
             non_gopro_files.append({
@@ -182,11 +188,20 @@ print(f"Duplicate filenames: {len(duplicates)}")
 print(f"Total duplicate media_ids: {sum(len(ids) - 1 for ids in duplicates.values())}")
 
 if duplicates:
-    print(f"\nAll duplicate filenames:")
+    print(f"\nAll duplicate filenames with full metadata:")
     for filename, media_ids in sorted(duplicates.items()):
         print(f"\n  {filename} ({len(media_ids)} copies):")
         for media_id in media_ids:
+            # Find full metadata for this media_id
+            file_info = next((f for f in gopro_files if f['media_id'] == media_id), {})
             print(f"    - media_id: {media_id}")
+            print(f"      created_at: {file_info.get('created_at', 'N/A')}")
+            print(f"      captured_at: {file_info.get('captured_at', 'N/A')}")
+            print(f"      file_size: {file_info.get('file_size', 0):,} bytes")
+            if file_info.get('duration'):
+                print(f"      duration: {file_info.get('duration')} sec")
+            if file_info.get('width') and file_info.get('height'):
+                print(f"      resolution: {file_info.get('width')}x{file_info.get('height')}")
 
 print(f"\n" + "=" * 60)
 print(f"EXPECTED RESULT AFTER NEXT SYNC:")
