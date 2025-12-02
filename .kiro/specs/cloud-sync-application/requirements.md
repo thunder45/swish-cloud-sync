@@ -34,7 +34,7 @@ The initial implementation focuses on GoPro Cloud as the source and AWS S3 with 
 
 1. WHEN the scheduled sync execution starts, THE Media Lister SHALL query the GoPro Cloud API to retrieve the complete list of available videos.
 
-2. THE Media Lister SHALL paginate through the GoPro Cloud API results with a page size of 100 items until all videos are retrieved.
+2. THE Media Lister SHALL paginate through the GoPro Cloud API results with a page size of 30 items (GoPro API default) processing pages sequentially in a loop controlled by the Orchestrator until all pages are retrieved.
 
 3. THE Media Lister SHALL extract metadata for each video including media identifier, filename, file size in bytes, upload timestamp, and duration in seconds.
 
