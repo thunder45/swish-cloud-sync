@@ -172,6 +172,7 @@ class OrchestrationConstruct(Construct):
                 "total_found.$": "$.Payload.total_found",
                 "new_count.$": "$.Payload.new_count",
                 "already_synced.$": "$.Payload.already_synced",
+                "pagination.$": "$.Payload.pagination",  # Capture pagination metadata
             },
             retry_on_service_exceptions=True,
         )
@@ -293,16 +294,32 @@ class OrchestrationConstruct(Construct):
             result_path="$.context",
         )
         
-        # Generate final summary
-        generate_summary = sfn.Pass(
+        # Generate final summary for completed pagination
+        generate_summary_complete = sfn.Pass(
             self,
-            "GenerateSummary",
+            "GenerateSummaryComplete",
             parameters={
                 "execution_id.$": "$.context.execution_id",
                 "correlation_id.$": "$.context.correlation_id",
                 "start_time.$": "$.context.start_time",
                 "total_synced.$": "$.context.total_synced",
                 "cookie_age_days.$": "$.validation.cookie_age_days",
+                "completion_reason": "Processed all pages",
+            },
+            result_path="$.summary",
+        )
+
+        # Generate final summary for no new videos
+        generate_summary_no_videos = sfn.Pass(
+            self,
+            "GenerateSummaryNoVideos",
+            parameters={
+                "execution_id.$": "$.context.execution_id",
+                "correlation_id.$": "$.context.correlation_id",
+                "start_time.$": "$.context.start_time",
+                "total_synced.$": "$.context.total_synced",
+                "cookie_age_days.$": "$.validation.cookie_age_days",
+                "completion_reason": "No new videos found",
             },
             result_path="$.summary",
         )
@@ -372,6 +389,9 @@ class OrchestrationConstruct(Construct):
                 result_path="$.error",
             )
 
+        # Check if more pages to process
+        check_more_pages = sfn.Choice(self, "CheckMorePages")
+        
         # Build the state machine flow with loop
         definition = (
             generate_correlation_id
@@ -386,9 +406,19 @@ class OrchestrationConstruct(Construct):
                             sfn.Condition.number_greater_than("$.media.new_count", 0),
                             download_videos_map
                             .next(increment_page)
-                            .next(list_media_task),  # Loop back to list next page
+                            .next(
+                                check_more_pages
+                                .when(
+                                    sfn.Condition.number_less_than_json_path(
+                                        "$.context.current_page",
+                                        "$.media.pagination.total_pages"
+                                    ),
+                                    list_media_task  # Loop back to list next page
+                                )
+                                .otherwise(generate_summary_complete.next(sync_complete))  # Reached last page
+                            )
                         )
-                        .otherwise(generate_summary.next(sync_complete))  # No more new videos, finish
+                        .otherwise(generate_summary_no_videos.next(sync_complete))  # No new videos on this page
                     ),
                 )
                 .otherwise(tokens_invalid)
