@@ -521,6 +521,11 @@ class GoProProvider(CloudProviderInterface):
         pages_needed = (max_results + page_size - 1) // page_size
         pagination_metadata = {}
         
+        # Track filtering statistics
+        total_items_seen = 0
+        filtered_non_gopro = 0
+        filtered_no_filename = 0
+        
         for _ in range(pages_needed):
             try:
                 headers = {
@@ -561,13 +566,17 @@ class GoProProvider(CloudProviderInterface):
                 
                 # Parse and filter media items
                 for item in media_items:
+                    total_items_seen += 1
                     filename = item.get('filename', '')
                     
                     if not filename:
+                        filtered_no_filename += 1
                         continue
                     
-                    # Only GoPro camera files (GH*/GO*)
+                    # Only GoPro camera files (GH*/GO*) - includes videos AND photos
                     if not (filename.startswith('GH') or filename.startswith('GO')):
+                        filtered_non_gopro += 1
+                        logger.debug(f"Skipping non-GoPro file: {filename}")
                         continue
                     
                     try:
@@ -610,7 +619,8 @@ class GoProProvider(CloudProviderInterface):
             except requests.exceptions.RequestException as e:
                 raise APIError(f"Network error on page {page}: {e}", status_code=500)
         
-        logger.info(f"Retrieved {len(videos)} videos from page {start_page}")
+        logger.info(f"Retrieved {len(videos)} GoPro files from page {start_page}")
+        logger.info(f"Filtering stats - Total API items: {total_items_seen}, GoPro files kept: {len(videos)}, Non-GoPro filtered: {filtered_non_gopro}, No filename: {filtered_no_filename}")
         logger.info(f"Pagination: {pagination_metadata}")
         return videos, pagination_metadata
 
