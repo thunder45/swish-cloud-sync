@@ -69,7 +69,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         all_videos, pagination = list_media_from_provider(provider, credentials, MAX_VIDEOS, correlation_id, page_number)
         
         logger.info(f'Found {len(all_videos)} total videos from provider (page {page_number})')
-        logger.info(f'Pagination metadata: {pagination}')
+        logger.info(f'Pagination metadata from GoPro API: {json.dumps(pagination)}')
         
         # Publish metric
         metrics_publisher.put_metric(
@@ -118,9 +118,11 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             'pagination': pagination
         }
         
-        logger.info('Media listing completed successfully', extra={
+        logger.info(f'Media listing completed successfully - Page {pagination.get("current_page", page_number)}/{pagination.get("total_pages", "?")}', extra={
             'total_found': len(all_videos),
             'new_count': len(new_videos),
+            'already_synced': len(all_videos) - len(new_videos),
+            'pagination': pagination,
             'duration_seconds': duration,
             'correlation_id': correlation_id
         })
@@ -267,7 +269,7 @@ def list_media_from_provider(
                 logger.warning(f'Failed to process video {video.media_id}: {str(e)}')
                 continue
         
-        logger.info(f'Retrieved and validated {len(video_dicts)} videos from provider')
+        logger.info(f'Retrieved and validated {len(video_dicts)} videos from provider with pagination info {pagination}')
         
         return video_dicts, pagination
         
@@ -424,57 +426,18 @@ def batch_get_sync_status(table: Any, media_ids: List[str]) -> Dict[str, str]:
     return sync_statuses
 
 
-@xray_recorder.capture('get_pagination_state')
-def get_pagination_state() -> int:
-    """
-    Get current pagination state from DynamoDB.
-    
-    Returns:
-        Current page number (1-indexed)
-    """
-    table = dynamodb.Table(DYNAMODB_TABLE)
-    
-    try:
-        response = table.get_item(
-            Key={'media_id': '_pagination_state'},
-            ProjectionExpression='current_page'
-        )
-        
-        item = response.get('Item', {})
-        page = item.get('current_page', 1)
-        
-        logger.info(f'Retrieved pagination state: page {page}')
-        return int(page)
-        
-    except Exception as e:
-        logger.warning(f'Error reading pagination state: {str(e)}, defaulting to page 1')
-        return 1
-
-
-@xray_recorder.capture('update_pagination_state')
-def update_pagination_state(page: int) -> None:
-    """
-    Update pagination state in DynamoDB.
-    
-    Args:
-        page: Next page number
-    """
-    table = dynamodb.Table(DYNAMODB_TABLE)
-    
-    try:
-        table.put_item(
-            Item={
-                'media_id': '_pagination_state',
-                'current_page': page,
-                'updated_at': datetime.utcnow().isoformat() + 'Z'
-            }
-        )
-        
-        logger.info(f'Updated pagination state to page {page}')
-        
-    except Exception as e:
-        logger.error(f'Error updating pagination state: {str(e)}', exc_info=True)
-        # Don't fail the entire execution for pagination state update
+# OBSOLETE: Pagination state now managed by Step Functions context
+# These functions are kept for backwards compatibility but not used
+#
+# @xray_recorder.capture('get_pagination_state')
+# def get_pagination_state() -> int:
+#     """Get current pagination state from DynamoDB (OBSOLETE - Step Functions tracks this)"""
+#     pass
+#
+# @xray_recorder.capture('update_pagination_state')
+# def update_pagination_state(page: int) -> None:
+#     """Update pagination state in DynamoDB (OBSOLETE - Step Functions tracks this)"""
+#     pass
 
 
 def publish_api_structure_alert(message: str, correlation_id: str, response_sample: str = None) -> None:
