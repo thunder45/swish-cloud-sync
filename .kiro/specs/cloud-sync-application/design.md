@@ -50,8 +50,8 @@ The Cloud Sync Application is a serverless, event-driven system built on AWS tha
 │         ▼           ▼              ▼                              │
 │  ┌──────────┐ ┌──────────┐ ┌──────────────┐                    │
 │  │ Lambda:  │ │ Lambda:  │ │ Lambda:      │                    │
-│  │ Media    │ │ Media    │ │ Video        │                    │
-│  │ Auth     │ │ Lister   │ │ Downloader   │                    │
+│  │ Token    │ │ Media    │ │ Video        │                    │
+│  │Validator │ │ Lister   │ │ Downloader   │                    │
 │  └────┬─────┘ └────┬─────┘ └──────┬───────┘                    │
 │       │            │               │                             │
 │       ▼            ▼               ▼                             │
@@ -88,10 +88,11 @@ The Cloud Sync Application is a serverless, event-driven system built on AWS tha
 
 ```
 1. EventBridge triggers Step Functions at scheduled time
-2. Step Functions invokes Media Authenticator
-   └─> Retrieves/refreshes credentials from Secrets Manager
-   └─> Returns auth token
-3. Step Functions invokes Media Lister with auth token
+2. Step Functions invokes Token Validator
+   └─> Retrieves credentials from Secrets Manager (read-only)
+   └─> Validates tokens with test API call
+   └─> Returns valid status and auth headers
+3. Step Functions invokes Media Lister for current page
    └─> Queries GoPro API for video list (paginated)
    └─> Checks DynamoDB for each video's sync status
    └─> Returns list of new/failed videos
@@ -259,8 +260,8 @@ The sync workflow has been paused until tokens are refreshed.
 - **Concurrency**: 1
 - **Environment Variables**:
   - `DYNAMODB_TABLE`: "gopro-sync-tracker"
-  - `PAGE_SIZE`: 100
-  - `MAX_VIDEOS`: 1000
+  - `PAGE_SIZE`: 30  (matches GoPro API default)
+  - `MAX_VIDEOS`: 100  (videos per page to download)
 
 **Input Interface**:
 ```json
@@ -287,19 +288,24 @@ The sync workflow has been paused until tokens are refreshed.
       "duration": 180
     }
   ],
-  "total_found": 150,
+  "total_found": 30,
   "new_count": 12,
-  "already_synced": 138
+  "already_synced": 18,
+  "pagination": {
+    "current_page": 1,
+    "total_pages": 33,
+    "total_items": 971,
+    "per_page": 30
+  }
 }
 ```
 
 **Core Logic**:
-1. Initialize pagination (page=1, per_page=100)
-2. Loop until all pages retrieved or max_videos reached:
-   - Call GoPro API: GET /media/search?page={page}&per_page={per_page}
-   - Extract video metadata from response
-   - Add to videos list
-3. For each video, query DynamoDB:
+1. Receive page_number from Step Functions (state machine loop)
+2. Call GoPro API for single page: GET /media/search?page={page_number}&per_page=30
+3. Extract pagination metadata from _pages response field (current_page, total_pages, total_items)
+4. Return pagination metadata to Step Functions for loop control
+5. For each video in the page, query DynamoDB:
    - GetItem with PK=media_id
    - If item doesn't exist OR status != "COMPLETED", add to new_videos list
 4. Return filtered list with counts
@@ -2914,4 +2920,3 @@ self.archive_bucket.add_lifecycle_rule(
    - Trigger sync on new video upload (webhook)
    - Real-time sync instead of scheduled
    - Reduce latency for critical videos
-
