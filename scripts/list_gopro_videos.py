@@ -75,7 +75,7 @@ def main():
             cookies=cookies,
             user_agent=user_agent,
             page_size=100,
-            max_results=1000
+            max_results=2000
         )
         
         print(f"✅ Found {len(videos)} videos in your GoPro Cloud library")
@@ -88,23 +88,44 @@ def main():
             return
         
         # Display videos
-        print(f"{'#':<4} {'Media ID':<20} {'Filename':<25} {'Size':<12} {'Duration':<10}")
-        print("-" * 70)
+        print(f"{'#':<4} {'Filename':<25} {'Size':<10} {'Captured':<12} {'Created':<12} {'Duration':<8}")
+        print("-" * 80)
         
         for idx, video in enumerate(videos, 1):
-            # Format file size
-            size_gb = video.file_size / (1024 ** 3)
-            size_str = f"{size_gb:.2f} GB"
+            # Format file size (MB for JPG/jpg, GB for videos)
+            filename_lower = video.filename.lower()
+            if filename_lower.endswith('.jpg') or filename_lower.endswith('.jpeg'):
+                size_mb = video.file_size / (1024 ** 2)
+                size_str = f"{size_mb:.2f} MB"
+            else:
+                size_gb = video.file_size / (1024 ** 3)
+                size_str = f"{size_gb:.2f} GB"
             
             # Format duration
             duration_min = video.duration / 60
             duration_str = f"{duration_min:.1f} min"
             
-            # Truncate filename and media_id if needed
-            filename = video.filename[:24]
-            media_id = video.media_id[:19]
+            # Format dates
+            captured_date = 'N/A'
+            if video.captured_at:
+                try:
+                    dt = datetime.fromisoformat(video.captured_at.replace('Z', '+00:00'))
+                    captured_date = dt.strftime('%Y-%m-%d')
+                except:
+                    captured_date = video.captured_at[:10] if len(video.captured_at) >= 10 else 'N/A'
             
-            print(f"{idx:<4} {media_id:<20} {filename:<25} {size_str:<12} {duration_str:<10}")
+            created_date = 'N/A'
+            if video.created_at:
+                try:
+                    dt = datetime.fromisoformat(video.created_at.replace('Z', '+00:00'))
+                    created_date = dt.strftime('%Y-%m-%d')
+                except:
+                    created_date = video.created_at[:10] if len(video.created_at) >= 10 else 'N/A'
+            
+            # Truncate filename if needed
+            filename = video.filename[:24]
+            
+            print(f"{idx:<4} {filename:<25} {size_str:<10} {captured_date:<12} {created_date:<12} {duration_str:<8}")
         
         print()
         print("=" * 70)
@@ -114,7 +135,11 @@ def main():
         total_size_gb = sum(v.file_size for v in videos) / (1024 ** 3)
         total_duration_min = sum(v.duration for v in videos) / 60
         
+        # Get current timestamp
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
         print("📊 Summary:")
+        print(f"   Query date/time: {current_time}")
         print(f"   Total videos: {len(videos)}")
         print(f"   Total size: {total_size_gb:.2f} GB")
         print(f"   Total duration: {total_duration_min:.1f} minutes ({total_duration_min/60:.1f} hours)")

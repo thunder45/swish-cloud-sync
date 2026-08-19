@@ -401,6 +401,7 @@ class LambdaConstruct(Construct):
                 "dynamodb:UpdateItem",
                 "dynamodb:PutItem",
                 "dynamodb:GetItem",
+                "dynamodb:Scan",  # Required for duplicate filename detection
             ],
             resources=[self.dynamodb_table_arn],
         ))

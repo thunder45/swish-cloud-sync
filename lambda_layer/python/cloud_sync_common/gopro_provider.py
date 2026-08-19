@@ -274,18 +274,19 @@ class GoProProvider(CloudProviderInterface):
                 # Parse media items
                 for item in media_items:
                     try:
-                        # Strict filtering for GoPro camera files only
                         filename = item.get('filename', '')
+                        gopro_media = item.get('gopro_media')
                         
                         # Skip if no filename
                         if not filename:
                             logger.debug(f"Skipping item with no filename: {item.get('id')}")
                             continue
                         
-                        # Only include files starting with GH or GO (GoPro camera naming)
-                        # GH = GoPro HERO series, GO = older GoPro models
-                        if not (filename.startswith('GH') or filename.startswith('GO')):
-                            logger.debug(f"Skipping non-GoPro filename: {filename}")
+                        # Only GoPro camera files - use gopro_media field (more reliable)
+                        # gopro_media=true indicates files captured by GoPro camera
+                        # gopro_media=false indicates uploaded/edited files
+                        if gopro_media is not True:
+                            logger.debug(f"Skipping non-camera file: {filename} (gopro_media={gopro_media})")
                             continue
                         
                         video = self._parse_media_item(item)
@@ -391,6 +392,17 @@ class GoProProvider(CloudProviderInterface):
         elif duration is None:
             duration = 0
         
+        # Extract extended GoPro metadata for duplicate detection
+        camera_model = item.get('camera_model')
+        captured_at = item.get('captured_at')
+        created_at = item.get('created_at')
+        file_extension = item.get('file_extension')
+        height = item.get('height')
+        width = item.get('width')
+        resolution = item.get('resolution')
+        source_duration = item.get('source_duration')
+        media_type = item.get('type')
+        
         return VideoMetadata(
             media_id=media_id,
             filename=filename,
@@ -398,7 +410,16 @@ class GoProProvider(CloudProviderInterface):
             file_size=file_size,
             upload_date=upload_date,
             duration=duration,
-            provider='gopro'
+            provider='gopro',
+            camera_model=camera_model,
+            captured_at=captured_at,
+            created_at=created_at,
+            file_extension=file_extension,
+            height=height,
+            width=width,
+            resolution=resolution,
+            source_duration=source_duration,
+            media_type=media_type
         )
     
     def get_download_url(
@@ -568,15 +589,18 @@ class GoProProvider(CloudProviderInterface):
                 for item in media_items:
                     total_items_seen += 1
                     filename = item.get('filename', '')
+                    gopro_media = item.get('gopro_media')
                     
                     if not filename:
                         filtered_no_filename += 1
                         continue
                     
-                    # Only GoPro camera files (GH*/GO*) - includes videos AND photos
-                    if not (filename.startswith('GH') or filename.startswith('GO')):
+                    # Only GoPro camera files - use gopro_media field (more reliable than filename)
+                    # gopro_media=true indicates files captured by GoPro camera
+                    # gopro_media=false indicates uploaded/edited files
+                    if gopro_media is not True:
                         filtered_non_gopro += 1
-                        logger.debug(f"Skipping non-GoPro file: {filename}")
+                        logger.debug(f"Skipping non-camera file: {filename} (gopro_media={gopro_media})")
                         continue
                     
                     try:

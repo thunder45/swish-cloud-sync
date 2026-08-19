@@ -16,6 +16,17 @@ class VideoMetadata:
     upload_date: str
     duration: Optional[int] = None
     provider: str = "unknown"
+    
+    # Extended GoPro metadata for duplicate detection
+    camera_model: Optional[str] = None
+    captured_at: Optional[str] = None
+    created_at: Optional[str] = None
+    file_extension: Optional[str] = None
+    height: Optional[int] = None
+    width: Optional[int] = None
+    resolution: Optional[str] = None
+    source_duration: Optional[str] = None
+    media_type: Optional[str] = None
 
 
 @dataclass

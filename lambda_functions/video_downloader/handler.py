@@ -64,6 +64,24 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         file_size = event.get('file_size', 0)
         upload_date = event.get('upload_date', '')
         
+        # Extract extended metadata for duplicate detection
+        metadata = {
+            'media_id': media_id,
+            'filename': filename,
+            'file_size': file_size,
+            'upload_date': upload_date,
+            'duration': event.get('duration'),
+            'media_type': event.get('media_type'),
+            'resolution': event.get('resolution'),
+            'camera_model': event.get('camera_model'),
+            'captured_at': event.get('captured_at'),
+            'created_at': event.get('created_at'),
+            'file_extension': event.get('file_extension'),
+            'height': event.get('height'),
+            'width': event.get('width'),
+            'source_duration': event.get('source_duration')
+        }
+        
         xray_recorder.put_annotation('provider', provider_name)
         xray_recorder.put_annotation('media_id', media_id)
         xray_recorder.put_annotation('file_size', file_size)
@@ -74,8 +92,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Retrieve credentials from Secrets Manager
         credentials = retrieve_credentials()
         
-        # Generate S3 key
-        s3_key = generate_s3_key(provider_name, filename, upload_date)
+        # Generate unique S3 key using full metadata fingerprint
+        s3_key = generate_unique_s3_key(table, provider_name, metadata, upload_date)
         
         # Check idempotency
         if check_already_uploaded(s3_key, media_id):
@@ -88,13 +106,23 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'correlation_id': correlation_id
             }
         
-        # Update status to IN_PROGRESS
-        update_sync_status(table, media_id, 'IN_PROGRESS', {
+        # Update status to IN_PROGRESS with full metadata
+        update_attributes = {
             'provider': provider_name,
             'filename': filename,
             'file_size': file_size,
-            'upload_date': upload_date
-        })
+            'upload_date': upload_date,
+        }
+        
+        # Add extended metadata fields (only if not None)
+        for key in ['duration', 'media_type', 'resolution', 'camera_model', 
+                    'captured_at', 'created_at', 'file_extension', 'height', 
+                    'width', 'source_duration']:
+            value = metadata.get(key)
+            if value is not None:
+                update_attributes[key] = value
+        
+        update_sync_status(table, media_id, 'IN_PROGRESS', update_attributes)
         
         # Get actual download URL using 2-step process
         logger.info(f'Resolving download URL for {media_id}')
@@ -316,6 +344,238 @@ def generate_s3_key(provider: str, filename: str, upload_date: str) -> str:
     return f'{provider}-videos/{year}/{month}/{filename}'
 
 
+@xray_recorder.capture('query_existing_filenames')
+def query_existing_filenames(table: Any, filename_pattern: str) -> list:
+    """
+    Query DynamoDB for all items with s3_key containing the filename pattern.
+    
+    Args:
+        table: DynamoDB table resource
+        filename_pattern: Base filename to search for (e.g., 'GH011189.MP4')
+        
+    Returns:
+        List of dictionaries with s3_key and file_size for each match
+    """
+    try:
+        # Scan table for items where s3_key contains the filename
+        # Note: This is a filter, not a query, since s3_key is not a key
+        response = table.scan(
+            FilterExpression='contains(s3_key, :filename)',
+            ExpressionAttributeValues={':filename': filename_pattern},
+            ProjectionExpression='s3_key, file_size, media_id'
+        )
+        
+        existing_items = []
+        for item in response.get('Items', []):
+            if 's3_key' in item:
+                existing_items.append({
+                    's3_key': item['s3_key'],
+                    'file_size': int(item.get('file_size', 0)),
+                    'media_id': item.get('media_id', '')
+                })
+        
+        logger.info(f'Found {len(existing_items)} existing items matching pattern: {filename_pattern}')
+        return existing_items
+        
+    except Exception as e:
+        logger.warning(f'Error querying existing filenames: {str(e)}')
+        return []
+
+
+def is_exact_duplicate(new_metadata: Dict[str, Any], existing_metadata: Dict[str, Any]) -> bool:
+    """
+    Check if metadata represents the exact same file using metadata fingerprint.
+    
+    Compares immutable characteristics to identify true duplicates.
+    
+    Args:
+        new_metadata: New file metadata
+        existing_metadata: Existing file metadata from DynamoDB
+        
+    Returns:
+        True if metadata fingerprints match (same file), False otherwise
+    """
+    # Compare critical immutable fields
+    filename_match = new_metadata.get('filename') == existing_metadata.get('filename')
+    size_match = new_metadata.get('file_size') == existing_metadata.get('file_size')
+    
+    # Compare captured_at if available (most definitive)
+    captured_at_match = True
+    if new_metadata.get('captured_at') and existing_metadata.get('captured_at'):
+        captured_at_match = new_metadata['captured_at'] == existing_metadata['captured_at']
+    
+    # Compare resolution if available
+    resolution_match = True
+    if new_metadata.get('resolution') and existing_metadata.get('resolution'):
+        resolution_match = new_metadata['resolution'] == existing_metadata['resolution']
+    
+    # Compare source_duration if available (milliseconds precision)
+    duration_match = True
+    if new_metadata.get('source_duration') and existing_metadata.get('source_duration'):
+        duration_match = new_metadata['source_duration'] == existing_metadata['source_duration']
+    
+    # All critical fields must match for exact duplicate
+    return filename_match and size_match and captured_at_match and resolution_match and duration_match
+
+
+@xray_recorder.capture('query_existing_files_metadata')
+def query_existing_files_metadata(table: Any, filename: str) -> list:
+    """
+    Query DynamoDB for all items with matching filename, including full metadata.
+    
+    Args:
+        table: DynamoDB table resource
+        filename: Filename to search for
+        
+    Returns:
+        List of dictionaries with full metadata for each match
+    """
+    try:
+        # Scan table for items where s3_key contains the filename
+        response = table.scan(
+            FilterExpression='contains(s3_key, :filename)',
+            ExpressionAttributeValues={':filename': filename},
+            ProjectionExpression='media_id, s3_key, filename, file_size, captured_at, resolution, source_duration, camera_model, height, width'
+        )
+        
+        existing_items = []
+        for item in response.get('Items', []):
+            if 's3_key' in item:
+                existing_items.append({
+                    'media_id': item.get('media_id', ''),
+                    's3_key': item['s3_key'],
+                    'filename': item.get('filename', ''),
+                    'file_size': int(item.get('file_size', 0)),
+                    'captured_at': item.get('captured_at'),
+                    'resolution': item.get('resolution'),
+                    'source_duration': item.get('source_duration'),
+                    'camera_model': item.get('camera_model'),
+                    'height': item.get('height'),
+                    'width': item.get('width')
+                })
+        
+        logger.info(f'Found {len(existing_items)} existing items matching filename: {filename}')
+        return existing_items
+        
+    except Exception as e:
+        logger.warning(f'Error querying existing files: {str(e)}')
+        return []
+
+
+@xray_recorder.capture('generate_unique_s3_key')
+def generate_unique_s3_key(
+    table: Any,
+    provider: str,
+    metadata: Dict[str, Any],
+    upload_date: str
+) -> str:
+    """
+    Generate unique S3 key using full metadata fingerprint for duplicate detection.
+    
+    Uses comprehensive metadata comparison to identify true duplicates:
+    - filename, file_size, captured_at, resolution, source_duration
+    
+    Args:
+        table: DynamoDB table resource
+        provider: Provider name
+        metadata: Complete file metadata dict
+        upload_date: Upload date (ISO format)
+        
+    Returns:
+        S3 object key (existing if exact duplicate, new with counter otherwise)
+    """
+    filename = metadata.get('filename', 'unknown.mp4')
+    file_size = metadata.get('file_size', 0)
+    
+    # Generate base S3 key
+    base_key = generate_s3_key(provider, filename, upload_date)
+    
+    # Query DynamoDB for existing files with this filename
+    existing_items = query_existing_files_metadata(table, filename)
+    
+    # If no duplicates exist, use the base key
+    if not existing_items:
+        logger.info(f'No duplicates found for {filename}, using base key')
+        return base_key
+    
+    # Check for exact duplicate using metadata fingerprint
+    for item in existing_items:
+        if is_exact_duplicate(metadata, item):
+            logger.info(
+                f'Exact duplicate found via metadata fingerprint: {filename} - '
+                f'Metadata match (size={file_size}, captured_at={metadata.get("captured_at")}, '
+                f'resolution={metadata.get("resolution")}) - '
+                f'Reusing existing key: {item["s3_key"]}'
+            )
+            return item['s3_key']
+    
+    # No exact match - this is a true duplicate with different metadata
+    logger.info(
+        f'Different file detected: {filename} - '
+        f'New metadata (size={file_size}, captured_at={metadata.get("captured_at")}, '
+        f'resolution={metadata.get("resolution")}) does not match existing files'
+    )
+    
+    # Extract base filename and extension
+    filename_parts = filename.rsplit('.', 1)
+    if len(filename_parts) == 2:
+        base_filename, extension = filename_parts
+    else:
+        base_filename = filename
+        extension = ''
+    
+    # Find the highest counter used
+    max_counter = 1
+    for item in existing_items:
+        # Extract just the filename from the S3 key path
+        existing_filename = item['s3_key'].split('/')[-1]
+        
+        # Check if this is the base filename (without counter)
+        if existing_filename == filename:
+            max_counter = max(max_counter, 1)
+            continue
+        
+        # Check for numbered versions (e.g., GH011189_2.MP4)
+        if extension:
+            pattern = f'{base_filename}_'
+            if pattern in existing_filename and existing_filename.endswith(f'.{extension}'):
+                try:
+                    # Extract counter between base_filename_ and .extension
+                    counter_part = existing_filename.replace(pattern, '').replace(f'.{extension}', '')
+                    counter = int(counter_part)
+                    max_counter = max(max_counter, counter)
+                except ValueError:
+                    # Not a valid counter, skip
+                    pass
+    
+    # Generate new filename with next counter
+    next_counter = max_counter + 1
+    if extension:
+        unique_filename = f'{base_filename}_{next_counter}.{extension}'
+    else:
+        unique_filename = f'{base_filename}_{next_counter}'
+    
+    # Generate unique S3 key with the numbered filename
+    unique_key = generate_s3_key(provider, unique_filename, upload_date)
+    
+    logger.info(
+        f'Creating numbered version: {unique_filename} (version {next_counter})'
+    )
+    
+    # Publish duplicate metric
+    try:
+        metrics_publisher.put_metric(
+            metric_name='DuplicateFilename',
+            value=1,
+            unit='Count',
+            dimensions={'Provider': provider, 'Filename': base_filename}
+        )
+    except Exception as e:
+        logger.warning(f'Error publishing duplicate metric: {str(e)}')
+    
+    return unique_key
+
+
 @xray_recorder.capture('check_already_uploaded')
 def check_already_uploaded(s3_key: str, media_id: str) -> bool:
     """
@@ -365,6 +625,12 @@ def update_sync_status(
         status: Sync status
         attributes: Additional attributes to update
     """
+    # DynamoDB reserved keywords that need attribute name substitution
+    RESERVED_KEYWORDS = {
+        'duration', 'status', 'timestamp', 'type', 'name', 'size',
+        'date', 'format', 'order', 'value', 'data', 'time'
+    }
+    
     try:
         # Build update expression
         update_expr = 'SET #status = :status, update_timestamp = :timestamp'
@@ -377,7 +643,17 @@ def update_sync_status(
         # Add additional attributes
         for key, value in attributes.items():
             safe_key = key.replace('-', '_')
-            update_expr += f', {safe_key} = :{safe_key}'
+            
+            # Check if key is a reserved keyword
+            if safe_key.lower() in RESERVED_KEYWORDS:
+                # Use attribute name substitution
+                attr_name = f'#{safe_key}'
+                update_expr += f', {attr_name} = :{safe_key}'
+                expr_attr_names[attr_name] = safe_key
+            else:
+                # Use key directly
+                update_expr += f', {safe_key} = :{safe_key}'
+            
             expr_attr_values[f':{safe_key}'] = value
         
         table.update_item(

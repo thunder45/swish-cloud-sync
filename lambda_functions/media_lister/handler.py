@@ -257,7 +257,15 @@ def list_media_from_provider(
                     'upload_date': video.upload_date,
                     'duration': video.duration,
                     'media_type': getattr(video, 'media_type', 'video'),
-                    'resolution': getattr(video, 'resolution', 'unknown')
+                    'resolution': getattr(video, 'resolution', 'unknown'),
+                    # Extended GoPro metadata for duplicate detection
+                    'camera_model': getattr(video, 'camera_model', None),
+                    'captured_at': getattr(video, 'captured_at', None),
+                    'created_at': getattr(video, 'created_at', None),
+                    'file_extension': getattr(video, 'file_extension', None),
+                    'height': getattr(video, 'height', None),
+                    'width': getattr(video, 'width', None),
+                    'source_duration': getattr(video, 'source_duration', None)
                 }
                 
                 # Validate required fields
@@ -306,12 +314,13 @@ def validate_video_metadata(video: Dict[str, Any]) -> None:
 def filter_new_videos(videos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Filter videos to find those that need to be synced.
+    For videos already COMPLETED, updates metadata from GoPro API.
     
     Args:
-        videos: List of video metadata
+        videos: List of video metadata with full GoPro fields
         
     Returns:
-        List of videos that need to be synced
+        List of videos that need to be downloaded
     """
     if not videos:
         return []
@@ -323,8 +332,10 @@ def filter_new_videos(videos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     media_ids = [video['media_id'] for video in videos]
     sync_statuses = batch_get_sync_status(table, media_ids)
     
-    # Filter for new videos
+    # Filter for new videos and update metadata for existing
     new_videos = []
+    metadata_updated = 0
+    
     for video in videos:
         media_id = video['media_id']
         status = sync_statuses.get(media_id)
@@ -336,9 +347,14 @@ def filter_new_videos(videos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             new_videos.append(video)
             logger.debug(f'Video {media_id} needs sync (status: {status})')
         else:
-            logger.debug(f'Video {media_id} already synced, skipping')
+            # Video already synced - update metadata from GoPro API
+            logger.debug(f'Video {media_id} already synced, updating metadata')
+            
+            if update_video_metadata(table, media_id, video):
+                metadata_updated += 1
     
     logger.info(f'Filtered {len(new_videos)} new videos from {len(videos)} total')
+    logger.info(f'Updated metadata for {metadata_updated} existing videos')
     
     return new_videos
 
@@ -424,6 +440,82 @@ def batch_get_sync_status(table: Any, media_ids: List[str]) -> Dict[str, str]:
     logger.info(f'Retrieved {len(sync_statuses)} sync statuses from DynamoDB')
     
     return sync_statuses
+
+
+@xray_recorder.capture('update_video_metadata')
+def update_video_metadata(table: Any, media_id: str, video_metadata: Dict[str, Any]) -> bool:
+    """
+    Update DynamoDB record with fresh metadata from GoPro API.
+    
+    This keeps DynamoDB in sync with GoPro for already-downloaded files.
+    
+    Args:
+        table: DynamoDB table resource
+        media_id: Media ID to update
+        video_metadata: Complete metadata dict from GoPro API
+        
+    Returns:
+        True if update successful, False otherwise
+    """
+    # DynamoDB reserved keywords that need attribute name substitution
+    RESERVED_KEYWORDS = {
+        'duration', 'status', 'timestamp', 'type', 'name', 'size',
+        'date', 'format', 'order', 'value', 'data', 'time'
+    }
+    
+    try:
+        # Build update expression for metadata fields
+        update_parts = []
+        expr_values = {':timestamp': datetime.utcnow().isoformat() + 'Z'}
+        expr_attr_names = {}
+        
+        # Add all metadata fields (only non-None values)
+        metadata_fields = ['camera_model', 'captured_at', 'created_at', 'file_extension',
+                          'height', 'width', 'resolution', 'source_duration', 'media_type',
+                          'duration', 'upload_date', 'filename', 'file_size']
+        
+        for field in metadata_fields:
+            value = video_metadata.get(field)
+            if value is not None:
+                safe_field = field.replace('-', '_')
+                
+                # Check if field is a reserved keyword
+                if safe_field.lower() in RESERVED_KEYWORDS:
+                    # Use attribute name substitution
+                    attr_name = f'#{safe_field}'
+                    update_parts.append(f'{attr_name} = :{safe_field}')
+                    expr_attr_names[attr_name] = safe_field
+                else:
+                    # Use field directly
+                    update_parts.append(f'{safe_field} = :{safe_field}')
+                
+                expr_values[f':{safe_field}'] = value
+        
+        if not update_parts:
+            return True  # No metadata to update
+        
+        # Add update timestamp
+        update_expr = 'SET ' + ', '.join(update_parts) + ', metadata_updated = :timestamp'
+        
+        # Build update_item kwargs
+        update_kwargs = {
+            'Key': {'media_id': media_id},
+            'UpdateExpression': update_expr,
+            'ExpressionAttributeValues': expr_values
+        }
+        
+        # Only add ExpressionAttributeNames if we have reserved keywords
+        if expr_attr_names:
+            update_kwargs['ExpressionAttributeNames'] = expr_attr_names
+        
+        table.update_item(**update_kwargs)
+        
+        logger.debug(f'Updated metadata for {media_id}')
+        return True
+        
+    except Exception as e:
+        logger.warning(f'Failed to update metadata for {media_id}: {str(e)}')
+        return False
 
 
 # OBSOLETE: Pagination state now managed by Step Functions context
