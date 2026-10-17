@@ -79,3 +79,24 @@ package-lock.json
 tmp/
 temp/
 *.tmp
+
+# Local GoPro -> Google Photos tooling (never commit credentials, ledgers or media)
+client_secret*.json
+token*.json
+*.pickle
+cookies*.txt
+*.har
+*.sqlite
+*.sqlite3
+*.mp4
+*.MP4
+*.jpg
+*.JPG
+*.jpeg
+*.lrv
+*.LRV
+*.thm
+*.THM
+*.360
+*_original
+lambda_layer/python/bin/
