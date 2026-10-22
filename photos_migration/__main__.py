@@ -76,6 +76,8 @@ def main(argv=None) -> int:
     sub.add_parser("review-csv", help="(re)write same_name_review.csv, keeping decisions")
     sub.add_parser("status", help="ledger summary")
     sub.add_parser("audit", help="inventory <-> ledger <-> Google Photos audit")
+    al = sub.add_parser("albums", help="one album per trip/outing")
+    al.add_argument("--create", action="store_true")
     cl = sub.add_parser("cleanup", help="trash superseded copies in Google Photos (via the web UI)")
     cl.add_argument("--plan", action="store_true")
     cl.add_argument("--limit", type=int, default=10)
@@ -102,6 +104,9 @@ def main(argv=None) -> int:
         inv = {x["id"]: x for x in load_inventory()}
         items = [inv[i] for i in a.ids] if a.cmd == "pilot" else list(inv.values())
         return _run(items, upload=not a.no_upload, reencode=not a.no_reencode)
+    elif a.cmd == "albums":
+        from .albums import main as albums_main
+        return albums_main(create=a.create)
     elif a.cmd == "cleanup":
         from . import cleanup
         if a.recheck:

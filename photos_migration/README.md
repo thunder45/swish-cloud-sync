@@ -19,6 +19,7 @@ the real capture date/time/location, and cleans up older reduced copies.
 | `pilot <ids>` / `run` | Download original → dedup by SHA-256 → capture time/place → adaptive HEVC → write metadata → upload |
 | `audit` | Inventory ↔ ledger ↔ Google read-back: completeness, exact times, no app duplicates, albums |
 | `fix-dates` | Re-upload camera-clock-reset items (2015/2016 dates) with the real time |
+| `albums` / `albums --create` | One album per trip (consecutive days away from home) or outing (other days), named by date + place |
 | `cleanup --plan` / `cleanup` | Move superseded copies to the Google Photos trash via the web UI, verifying each item |
 | `status` | Ledger counts |
 
