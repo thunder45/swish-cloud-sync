@@ -111,6 +111,15 @@ def _doctor() -> int:
 
 
 def main(argv=None) -> int:
+    from .gphotos import PhotosAuthError
+    try:
+        return _main(argv)
+    except (GoProAuthError, PhotosAuthError) as e:
+        print(f"STOPPED: {e}", file=sys.stderr)
+        return 2
+
+
+def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="photos_migration")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init", help="create a NEW empty ledger (only for a brand-new migration)")

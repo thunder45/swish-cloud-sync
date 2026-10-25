@@ -359,3 +359,17 @@ def test_printed_paths_and_errors_hide_personal_data():
     err = _classify(requests.exceptions.InvalidURL("bad https://photoslibrary.googleapis.com/upload?upload_id=SECRET"), "upload")
     assert "SECRET" not in str(err)
     assert "SIGNED" not in repr(Source("g", None, "source", "https://cdn/x?Signature=SIGNED", "a.mp4"))
+
+
+# 17. An expired Google sign-in at start-up left the lease held (blocking other machines).
+def test_failed_start_releases_the_lease(ledger, monkeypatch):
+    from photos_migration import gphotos
+    from photos_migration.pipeline import Migrator
+
+    def expired(*a, **k):
+        raise gphotos.PhotosAuthError("Google sign-in needed")
+    monkeypatch.setattr(gphotos, "GooglePhotos", expired)
+    ledger.upsert("A", gopro_id="A", status="DONE", media_item_id="MI")
+    with pytest.raises(gphotos.PhotosAuthError):
+        Migrator([{"id": "A", "type": "Photo", "filename": "GOPR0001.JPG"}], upload=True)
+    assert ledger.meta("lease_holder") is None

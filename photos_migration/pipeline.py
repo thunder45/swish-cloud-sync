@@ -203,24 +203,32 @@ class Migrator:
                              f"{len(items)}: is this the right (fully synced) ledger? Pass --first-run only for a "
                              "brand-new migration.")
         self.ledger.acquire_lease(takeover)
-        self.photos = None
-        if upload:
-            from .gphotos import GooglePhotos, client_id
-            self.photos = GooglePhotos()
-            cid = client_id()
-            known = self.ledger.meta("oauth_client_id")
-            if known and known != cid:
-                raise SystemExit("this machine uses a different Google OAuth client than the one that created the "
-                                 "uploads; items of the other client are invisible here. Use the original "
-                                 "client_secret.json.")
-            self.ledger.set_meta("oauth_client_id", cid)
-            self.check_ledger_matches_google()
+        try:
+            self._connect_google(upload)
+        except BaseException:
+            self.ledger.release_lease()        # a failed start must not block other machines
+            raise
         self.reencode = reencode
         self.hint = TzHints(items, self.ledger)
         self.review = review_groups(items)
         self.decisions = read_review_decisions()
         self.video_stems = {Path(x["filename"]).stem.upper() for x in items
                             if x["type"] in ("Video", "TimeLapseVideo") and x.get("filename")}
+
+    def _connect_google(self, upload: bool) -> None:
+        self.photos = None
+        if not upload:
+            return
+        from .gphotos import GooglePhotos, client_id
+        self.photos = GooglePhotos()
+        cid = client_id()
+        known = self.ledger.meta("oauth_client_id")
+        if known and known != cid:
+            raise SystemExit("this machine uses a different Google OAuth client than the one that created the "
+                             "uploads; items of the other client are invisible here. Use the original "
+                             "client_secret.json.")
+        self.ledger.set_meta("oauth_client_id", cid)
+        self.check_ledger_matches_google()
 
     def log(self, uid: str, msg: str) -> None:
         print(f"[{uid}] {msg}", flush=True)
