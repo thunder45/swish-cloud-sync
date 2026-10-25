@@ -100,3 +100,7 @@ cookies*.txt
 *.360
 *_original
 lambda_layer/python/bin/
+
+# Local secrets, browser profile and temp work (data lives on Google Drive)
+local/
+.venv/

@@ -3,13 +3,30 @@
 Local tool (no AWS) that copies every GoPro Cloud original to Google Photos once, with
 the real capture date/time/location, and cleans up older reduced copies.
 
+## Where things live
+
+| Place | Contents | On a new machine |
+|---|---|---|
+| `local/secrets/` (in this project, git-ignored) | `client_secret.json` (Google OAuth client), `google_token.json`, `gopro_cookies.txt` | copy the folder, or recreate: download the client again from Google Cloud, sign in again, paste fresh GoPro cookies |
+| `local/chrome-profile/` | Chrome profile signed in to Google Photos (web search/cleanup) | sign in again when the browser opens |
+| `local/work/` | temporary downloads/encodes (multi-GB during a run) | nothing to keep |
+| `.venv/` | Python environment | recreate (see Setup) |
+| **Google Drive** `My Drive/swish-cloud-sync-data/` | **`ledger.sqlite3`** (what was uploaded — needed to avoid duplicates on future runs), inventory, review/cleanup/album sheets, `trip_names.json`, logs | comes with Google Drive for desktop; nothing to do |
+
+Override with `SWISH_LOCAL_DIR` / `SWISH_DATA_DIR`. Use the ledger from one machine at a time
+(SQLite on a synced folder must not be open on two machines at once).
+
 ## Setup
 
-- Python 3.12 venv with `pip install -r photos_migration/requirements.txt playwright`; `exiftool` and `ffmpeg` (Homebrew).
-- GoPro: browser `Cookie` header in `~/.config/swish-cloud-sync/gopro_cookies.txt` (chmod 600).
-- Google: OAuth "Desktop app" client in `~/.config/swish-cloud-sync/client_secret.json`
-  (Photos Library API, scopes appendonly + readonly/edit.appcreateddata).
-- Data (inventory, SQLite ledger, work files) lives in `~/.local/share/swish-cloud-sync/`.
+```
+python3.12 -m venv .venv && .venv/bin/pip install -r photos_migration/requirements.txt
+brew install exiftool ffmpeg
+.venv/bin/python -m photos_migration status
+```
+
+- GoPro: copy the browser's `Cookie` header for api.gopro.com into `local/secrets/gopro_cookies.txt`.
+- Google: OAuth "Desktop app" client (Photos Library API; scopes appendonly +
+  readonly/edit.appcreateddata) saved as `local/secrets/client_secret.json`.
 
 ## Commands (`python -m photos_migration …`)
 

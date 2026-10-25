@@ -3,3 +3,4 @@ timezonefinder>=6.5
 google-auth>=2.30
 google-auth-oauthlib>=1.2
 reverse_geocoder>=1.5
+playwright>=1.45

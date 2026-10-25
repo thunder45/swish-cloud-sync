@@ -181,7 +181,7 @@ class TzHints:
 class Migrator:
     def __init__(self, items: list[dict], upload: bool = True, reencode: bool = True):
         config.ensure_dirs()
-        self._lock = open(config.DATA_DIR / "migration.lock", "w")
+        self._lock = open(config.LOCK_FILE, "w")
         try:
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

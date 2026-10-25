@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import config
 
-PROFILE = config.CONFIG_DIR / "chrome-profile"
+PROFILE = config.BROWSER_PROFILE
 OUT_DIR = config.DATA_DIR / "gp_search"
 
 

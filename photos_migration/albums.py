@@ -30,7 +30,7 @@ TRIP_GAP_DAYS = 2
 TRIP_REGION_KM = 400
 PLAN = config.DATA_DIR / "albums_plan.csv"
 # trip names chosen by the user, keyed by the trip's first day (kept outside the repo: personal data)
-TRIP_NAMES_FILE = config.CONFIG_DIR / "trip_names.json"
+TRIP_NAMES_FILE = config.TRIP_NAMES
 COUNTRY = {"LU": "Luxemburgo", "FR": "França", "DE": "Alemanha", "BE": "Bélgica", "NL": "Holanda", "ES": "Espanha",
            "PT": "Portugal", "IT": "Itália", "TR": "Turquia", "TN": "Tunísia", "BR": "Brasil", "CH": "Suíça",
            "AT": "Áustria", "GR": "Grécia", "HR": "Croácia", "GB": "Reino Unido", "MA": "Marrocos", "US": "EUA"}
