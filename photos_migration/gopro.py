@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import requests
@@ -28,7 +28,7 @@ class Source:
     gopro_id: str
     part: int | None          # chapter number when the item has several sources
     label: str                # 'source', 'baked_source' (Quik edit) or 'zip' (time-lapse/burst frames)
-    url: str                  # signed CDN URL - never log or persist it
+    url: str = field(repr=False)  # signed CDN URL - never log or persist it
     filename: str
 
 
@@ -49,19 +49,23 @@ class GoProClient:
         for attempt in range(6):
             try:
                 r = self.session.get(f"{API}{path}", params=params, timeout=60)
-            except requests.RequestException as e:
+            except (requests.ConnectionError, requests.Timeout) as e:
                 if attempt == 5:
                     raise config.NetworkDown(f"GoPro API unreachable: {type(e).__name__}") from None
                 time.sleep(10 * 2 ** attempt)
                 continue
-            if r.status_code == 429 or r.status_code >= 500:
-                time.sleep(2 ** attempt * 5)
-                continue
+            except requests.RequestException as e:
+                raise GoProError(f"GET {path}: {type(e).__name__}") from None
             if r.status_code in (401, 403):
                 raise GoProAuthError(f"HTTP {r.status_code}: cookies expired or blocked - refresh {config.GOPRO_COOKIES}")
-            r.raise_for_status()
+            if r.status_code == 429 or r.status_code >= 500 or (r.status_code == 404 and attempt < 2):
+                time.sleep(2 ** attempt * 5)      # GoPro sometimes answers a transient 404
+                continue
+            if r.status_code >= 400:
+                raise GoProError(f"GET {path}: HTTP {r.status_code}")
             return r.json()
-        raise config.NetworkDown(f"GoPro API kept failing (last HTTP {r.status_code if r is not None else "?"})")
+        # a service that keeps failing for one item must not pause the whole run: fail the item
+        raise GoProError(f"GET {path} kept failing (last HTTP {r.status_code if r is not None else '?'})")
 
     def list_all(self, page_sizes=(100, 97, 50)) -> list[dict]:
         """List every media item.

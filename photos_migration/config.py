@@ -6,11 +6,26 @@ Everything lives in two visible places (see README "Where things live"):
 Override with SWISH_LOCAL_DIR / SWISH_DATA_DIR.
 """
 import os
+import re
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 LOCAL_DIR = Path(os.environ.get("SWISH_LOCAL_DIR", PROJECT_DIR / "local"))
-DATA_DIR = Path(os.environ.get("SWISH_DATA_DIR", Path.home() / "Google Drive" / "My Drive" / "swish-cloud-sync-data"))
+DATA_FOLDER = "swish-cloud-sync-data"
+
+
+def _default_data_dir() -> Path:
+    """Google Drive for desktop mounts under ~/Library/CloudStorage/GoogleDrive-<account>/My Drive
+    (the on-disk name; Finder shows a localized one). The ~/Google Drive link is optional."""
+    mounts = sorted((Path.home() / "Library" / "CloudStorage").glob("GoogleDrive-*/My Drive"))
+    for m in mounts:
+        if (m / DATA_FOLDER).exists():
+            return m / DATA_FOLDER
+    base = mounts[0] if mounts else Path.home() / "Google Drive" / "My Drive"
+    return base / DATA_FOLDER
+
+
+DATA_DIR = Path(os.environ.get("SWISH_DATA_DIR") or _default_data_dir())
 
 SECRETS_DIR = LOCAL_DIR / "secrets"
 CONFIG_DIR = SECRETS_DIR                      # kept for older imports
@@ -39,18 +54,35 @@ DEFAULT_TIMEZONE = "Europe/Luxembourg"
 # smaller and its VMAF (harmonic mean) is at least this high.
 MIN_SAVING = 0.30
 MIN_VMAF = 95.0
-MIN_VMAF_P5 = 88.0      # 5th-percentile frame VMAF: no sustained visibly-bad stretch
+MIN_VMAF_P5 = 88.0      # 5th-percentile frame VMAF
+MIN_VMAF_P1 = 80.0      # 1st-percentile frame VMAF
+MIN_VMAF_WINDOW = 90.0  # worst rolling 2-second mean: no sustained visibly-bad stretch
+VMAF_WINDOW_S = 2.0
+
+
+def display(p) -> str:
+    """A path for printing: home as ~, the Google Drive account (an e-mail) masked."""
+    s = str(p)
+    home = str(Path.home())
+    if s.startswith(home):
+        s = "~" + s[len(home):]
+    return re.sub(r"GoogleDrive-[^/]+", "GoogleDrive-<account>", s)
 
 
 class NetworkDown(RuntimeError):
     """Internet (or a remote service) unreachable after retries: pause the run, do not mark items."""
 
 
-def ensure_dirs() -> None:
-    if not DATA_DIR.parent.exists():
-        raise SystemExit(f"data folder's parent not found: {DATA_DIR.parent}\n"
-                         "Is Google Drive for desktop running? Or set SWISH_DATA_DIR.")
-    for d in (SECRETS_DIR, BROWSER_PROFILE, WORK_DIR, DATA_DIR):
+def ensure_dirs(create_data: bool = False) -> None:
+    """Create the local folders. The data folder must already exist (it holds the ledger):
+    a missing one means Drive is not mounted/synced yet, never "start from scratch"."""
+    if not DATA_DIR.exists():
+        if not create_data:
+            raise SystemExit(f"data folder not found: {display(DATA_DIR)}\n"
+                             "Is Google Drive for desktop running and synced? Or set SWISH_DATA_DIR. "
+                             "Only 'python -m photos_migration init' creates a new one.")
+        DATA_DIR.mkdir(parents=True)
+    for d in (SECRETS_DIR, BROWSER_PROFILE, WORK_DIR):
         d.mkdir(parents=True, exist_ok=True)
     for d in (LOCAL_DIR, SECRETS_DIR, BROWSER_PROFILE):
         d.chmod(0o700)

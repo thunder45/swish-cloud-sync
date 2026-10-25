@@ -85,6 +85,13 @@ def review_groups(items: list[dict]) -> dict[str, str]:
         if len(grp) > 1:
             for x in grp:
                 out[x["id"]] = f"same recording (source_gumi) as {len(grp) - 1} other item(s)"
+    # a phone copy stored in GoPro Cloud itself: GH010001_1600000000000.MP4 next to GH010001.MP4
+    names = {n.upper() for n in by_name}
+    for n, grp in by_name.items():
+        m = re.match(r"^(G[A-Z0-9]{6,7})_[A-Z0-9]+(\.\w+)$", n, re.I)
+        if m and f"{m[1]}{m[2]}".upper() in names:
+            for x in grp:
+                out[x["id"]] = f"phone copy of {m[1]}{m[2]} stored in GoPro Cloud"
     return out
 
 
@@ -179,20 +186,35 @@ class TzHints:
 
 
 class Migrator:
-    def __init__(self, items: list[dict], upload: bool = True, reencode: bool = True):
+    def __init__(self, items: list[dict], upload: bool = True, reencode: bool = True,
+                 first_run: bool = False, takeover: bool = False):
         config.ensure_dirs()
         self._lock = open(config.LOCK_FILE, "w")
         try:
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise SystemExit("another migration run is active (migration.lock)")
+            raise SystemExit("another migration run is active (migration.lock)") from None
         self.items = {x["id"]: x for x in items}
         self.gopro = GoProClient()
         self.ledger = Ledger()
+        done = self.ledger.counts().get("DONE", 0)
+        if items and done == 0 and not first_run:
+            raise SystemExit(f"the ledger at {config.display(self.ledger.path)} has no uploaded items but the inventory has "
+                             f"{len(items)}: is this the right (fully synced) ledger? Pass --first-run only for a "
+                             "brand-new migration.")
+        self.ledger.acquire_lease(takeover)
         self.photos = None
         if upload:
-            from .gphotos import GooglePhotos
+            from .gphotos import GooglePhotos, client_id
             self.photos = GooglePhotos()
+            cid = client_id()
+            known = self.ledger.meta("oauth_client_id")
+            if known and known != cid:
+                raise SystemExit("this machine uses a different Google OAuth client than the one that created the "
+                                 "uploads; items of the other client are invisible here. Use the original "
+                                 "client_secret.json.")
+            self.ledger.set_meta("oauth_client_id", cid)
+            self.check_ledger_matches_google()
         self.reencode = reencode
         self.hint = TzHints(items, self.ledger)
         self.review = review_groups(items)
@@ -202,6 +224,19 @@ class Migrator:
 
     def log(self, uid: str, msg: str) -> None:
         print(f"[{uid}] {msg}", flush=True)
+
+    def check_ledger_matches_google(self) -> None:
+        """Every item this app created must be known to the ledger; otherwise the ledger is stale,
+        forked or wrong and uploading would create duplicates."""
+        known = {r["media_item_id"] for r in self.ledger.rows("media_item_id IS NOT NULL")}
+        try:
+            known |= {r[0] for r in self.ledger.db.execute("SELECT old_media_item_id FROM superseded")}
+        except Exception:  # noqa: BLE001 - table exists only after fix-dates
+            pass
+        unknown = set(self.photos.list_app_items()) - known
+        if unknown:
+            raise SystemExit(f"{len(unknown)} items created by this app in Google Photos are not in the ledger at "
+                             f"{config.display(self.ledger.path)}: the ledger is stale or not the right one. Stopping before any upload.")
 
     # ---------- item level ----------
     def _set_failed(self, uid: str, item: dict, note: str, **extra) -> None:
@@ -233,6 +268,7 @@ class Migrator:
 
     def process_item(self, item: dict) -> None:
         uid = item["id"]
+        self.ledger.heartbeat()
         if is_phone_media(item):
             self._hold(item, "EXCLUDED", "phone media (PXL_/Pixel)")
             return
@@ -295,7 +331,13 @@ class Migrator:
                 return
             status = "NEW"
         if status in ("NEW", "FAILED", "DOWNLOADED", "DEFERRED"):
-            if not (status == "DEFERRED" and orig.exists()):
+            if status == "DEFERRED" and orig.exists() and row["orig_sha256"]:
+                dup = self.ledger.live_duplicate_of(uid, row["orig_sha256"])   # a twin may have gone up meanwhile
+                if dup:
+                    self.ledger.upsert(uid, status="DUPLICATE", note=f"same original bytes as {dup}")
+                    shutil.rmtree(work, ignore_errors=True)
+                    return
+            else:
                 fresh = self.gopro.fresh_source(item, src.part, src.label)   # signed URLs expire
                 self._download(item, fresh, uid, name, orig)
                 if self.ledger.get(uid)["status"] == "DUPLICATE":
@@ -348,7 +390,10 @@ class Migrator:
         hint = self.hint(_cloud_utc(item))
         enc_json = None
         if is_video:
-            cap = metadata.capture_for_video(item, orig, hint)
+            try:
+                cap = metadata.capture_for_video(item, orig, hint)
+            except metadata.ClockReset as e:
+                return self._hold_clock_reset(uid, str(e))
             upload = orig
             if self.reencode:
                 self.log(uid, "probing HEVC re-encode")
@@ -358,24 +403,27 @@ class Migrator:
                     upload = work / f"upload{Path(name).suffix.lower()}"
                     enc.path.rename(upload)
                 enc_json = {"hevc": enc.use_hevc, "crf": enc.crf, "vmaf": enc.vmaf, "ratio": enc.ratio,
-                            "reason": enc.reason[:200]}
+                            "reason": enc.reason[:200], **(enc.stats or {})}
             metadata.write_video(upload, cap)
         else:
-            cap, needs_write = metadata.capture_for_photo(item, orig, hint)
+            reset = None
+            try:
+                cap, needs_write = metadata.capture_for_photo(item, orig, hint)
+            except metadata.ClockReset as e:
+                cap, needs_write, reset = None, True, str(e)
             if cap is None:
-                cap = self.source_video_capture(name)
-                if cap is not None and metadata.is_clock_reset(cap.utc.replace(tzinfo=None)):
-                    cap = None
+                cap = self.source_video_capture(name, item)
                 if cap is None and Path(name).stem.upper() in self.video_stems:
                     self.ledger.upsert(uid, status="DEFERRED", note="waiting for the source video's capture")
                     self.log(uid, "DEFERRED: frame grab waits for its source video")
                     return False
+                if cap is None and reset:
+                    return self._hold_clock_reset(uid, reset)
                 if cap is None:
-                    cap = metadata.capture_from_cloud(item, None, hint, item.get("camera_model"))
-                if metadata.is_clock_reset(cap.utc.replace(tzinfo=None)):
-                    self.ledger.upsert(uid, status="REVIEW", note="camera clock reset and no GPS/source video - date unknown")
-                    self.log(uid, "REVIEW: clock-reset date with nothing to correct it from")
-                    return False
+                    try:
+                        cap = metadata.capture_from_cloud(item, None, hint, item.get("camera_model"))
+                    except metadata.ClockReset as e:
+                        return self._hold_clock_reset(uid, str(e))
                 if cap.model is None:
                     cap.model = item.get("camera_model")
             if needs_write:
@@ -389,13 +437,31 @@ class Migrator:
         self.log(uid, f"prepared: {cap.local} {cap.offset_str} {cap.tz or ''} via {cap.source}")
         return True
 
-    def source_video_capture(self, photo_name: str) -> Capture | None:
-        """Frame grabs (GH010757.jpg) take time/place from their video (GH010757.MP4)."""
+    def _hold_clock_reset(self, uid: str, why: str) -> bool:
+        self.ledger.upsert(uid, status="REVIEW", note=f"camera clock reset, no GPS/source video ({why}); run fix-dates")
+        self.log(uid, "REVIEW: camera clock reset with nothing to correct it from")
+        return False
+
+    def source_video_capture(self, photo_name: str, item: dict | None = None) -> Capture | None:
+        """Frame grabs (GH010757.jpg) take time/place from their video (GH010757.MP4).
+        GoPro file names repeat, so among same-name videos take the one whose cloud timestamp
+        is closest to the grab's own (within two days: both carry the same camera clock, even
+        a reset one), and never a clock-reset capture."""
         stem = Path(photo_name).stem.upper()
-        for row in self.ledger.rows("kind IN ('Video','TimeLapseVideo') AND capture_json IS NOT NULL"):
-            if Path(row["filename"] or "").stem.upper() == stem:
-                return Capture.from_json(row["capture_json"])
-        return None
+        cands = []
+        for r in self.ledger.rows("kind IN ('Video','TimeLapseVideo') AND capture_json IS NOT NULL"):
+            if Path(r["filename"] or "").stem.upper() != stem:
+                continue
+            c = Capture.from_json(r["capture_json"])
+            if not metadata.is_clock_reset(c.utc.replace(tzinfo=None)):
+                cands.append((_cloud_utc(self.items.get(r["gopro_id"], {})) or c.utc, c))
+        if not cands:
+            return None
+        guess = _cloud_utc(item) if item else None
+        if guess is None:
+            return cands[0][1] if len(cands) == 1 else None
+        when, best = min(cands, key=lambda wc: abs(wc[0] - guess))
+        return best if abs(when - guess) <= timedelta(days=2) else None
 
     # ---------- upload ----------
     def _album(self, title: str | None) -> str | None:
@@ -447,9 +513,9 @@ class Migrator:
         title = f"{'Time-lapse' if item['type'] == 'TimeLapse' else 'Burst'} {item['captured_at'][:10]} {Path(item['filename']).stem}"
         try:
             z = zipfile.ZipFile(zpath)
-        except zipfile.BadZipFile:
+        except zipfile.BadZipFile as e:
             zpath.unlink()
-            raise GoProError(f"corrupt zip for {seq_id}; will download again")
+            raise GoProError(f"corrupt zip for {seq_id}; will download again") from e
         with z:
             frames = sorted((n for n in z.namelist() if n.lower().endswith(".jpg")),
                             key=lambda n: (int(Path(n).stem) if Path(n).stem.isdigit() else 10 ** 9, n))
@@ -463,7 +529,7 @@ class Migrator:
             names = [f"{m[1]}{int(m[2]) + i:04d}.JPG" if m else f"{Path(item['filename']).stem}_{i + 1:03d}.JPG"
                      for i in range(len(frames))]
             seq_hint = None
-            for fname, new_name in zip(frames, names):
+            for fname, new_name in zip(frames, names, strict=True):
                 uid = f"{seq_id}#{new_name}"
                 row = self.ledger.get(uid)
                 if row and (row["status"] in TERMINAL or row["media_item_id"]):
@@ -488,10 +554,14 @@ class Migrator:
                         continue
                     if seq_hint is None:
                         seq_hint = self._sequence_hint(z, frames, item)
-                    cap, needs_write = metadata.capture_for_photo(item, path, seq_hint)
-                    if cap is None:
-                        cap = metadata.capture_from_cloud(item, None, seq_hint, item.get("camera_model"))
-                        needs_write = True
+                    try:
+                        cap, needs_write = metadata.capture_for_photo(item, path, seq_hint)
+                        if cap is None:
+                            cap = metadata.capture_from_cloud(item, None, seq_hint, item.get("camera_model"))
+                            needs_write = True
+                    except metadata.ClockReset as e:
+                        self._hold_clock_reset(uid, str(e))
+                        continue
                     if needs_write:
                         metadata.write_photo(path, cap)
                     self.ledger.upsert(uid, capture_json=cap.to_json(), upload_file=str(path),
@@ -512,8 +582,11 @@ class Migrator:
             for fname in frames:
                 with z.open(fname) as s, open(tmp, "wb") as d:
                     shutil.copyfileobj(s, d)
-                cap, _ = metadata.capture_for_photo(item, tmp, None)
-                if cap and cap.source == "exif+gps" and cap.tz:
+                try:
+                    cap, _ = metadata.capture_for_photo(item, tmp, None)
+                except metadata.ClockReset:
+                    continue
+                if cap and cap.source in ("exif+gps", "gps-time (camera clock reset)") and cap.tz:
                     return cap.tz
         finally:
             tmp.unlink(missing_ok=True)

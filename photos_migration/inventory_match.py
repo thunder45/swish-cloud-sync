@@ -107,7 +107,7 @@ def match(items: list[dict], gp: list[dict]) -> tuple[list[dict], dict]:
         if exp is None:
             pending.append(item)
             continue
-        cands = candidates(item, lambda raw, span: near_multiple(raw, span, [exp]))
+        cands = candidates(item, lambda raw, span, exp=exp: near_multiple(raw, span, [exp]))
         cands.sort(key=lambda c: abs((c[0]["wall"] - datetime.strptime(item["captured_at"], "%Y-%m-%dT%H:%M:%SZ")) - c[1]))
         for i, (g, d) in enumerate(cands):
             take(item, g, d, "exact" if i == 0 else "chapter/sequence")

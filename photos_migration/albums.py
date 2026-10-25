@@ -17,7 +17,6 @@ import csv
 import json
 import math
 from collections import Counter, defaultdict
-from datetime import date, timedelta
 
 from . import config
 from .cleanup import _readable
@@ -164,8 +163,18 @@ def _google_place_names(plan: list[dict], gp: GooglePhotos) -> None:
         ctx.close()
 
 
-def main(create: bool = False) -> int:
-    led, gp = Ledger(), GooglePhotos()
+def main(create: bool = False, takeover: bool = False) -> int:
+    led = Ledger(readonly=not create)
+    if not create:
+        return _main(led, GooglePhotos(), create)
+    led.acquire_lease(takeover)
+    try:
+        return _main(led, GooglePhotos(), create)
+    finally:
+        led.release_lease()
+
+
+def _main(led: Ledger, gp: GooglePhotos, create: bool) -> int:
     plan, not_addable = build_plan(led, gp)
     _google_place_names(plan, gp)
     with open(PLAN, "w", newline="") as f:

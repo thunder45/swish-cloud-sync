@@ -30,6 +30,32 @@ class EncodeResult:
     vmaf: float | None = None
     ratio: float | None = None  # hevc bytes / original bytes
     reason: str = ""
+    stats: dict | None = None   # p5, p1, worst 2-s window and when it happens
+
+
+@dataclass
+class VmafStats:
+    hmean: float
+    p5: float
+    p1: float
+    worst_window: float
+    worst_window_at_s: float
+
+
+def window_stats(scores: list[float], fps: float, subsample: int) -> tuple[float, float]:
+    """(lowest rolling mean over VMAF_WINDOW_S, its start time in seconds)."""
+    if not scores:
+        return 0.0, 0.0
+    w = max(1, round(config.VMAF_WINDOW_S * fps / subsample))
+    if len(scores) <= w:
+        return sum(scores) / len(scores), 0.0
+    acc = sum(scores[:w])
+    best, at = acc, 0
+    for i in range(w, len(scores)):
+        acc += scores[i] - scores[i - w]
+        if acc < best:
+            best, at = acc, i - w + 1
+    return best / w, at * subsample / fps
 
 
 def _run(args: list[str]) -> None:
@@ -55,17 +81,26 @@ def color_range(path: Path) -> tuple[bool, bool]:
     return bitstream_full, container_full
 
 
-def vmaf(distorted: Path, reference: Path, subsample: int = 1) -> tuple[float, float]:
-    """(harmonic-mean VMAF, 5th-percentile frame VMAF)."""
+def fps(path: Path) -> float:
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate",
+                          "-of", "csv=p=0", str(path)], capture_output=True, text=True, check=True).stdout.strip()
+    num, _, den = out.partition("/")
+    return float(num) / float(den or 1) if num else 30.0
+
+
+def vmaf(distorted: Path, reference: Path, subsample: int = 1) -> VmafStats:
     log = distorted.with_suffix(".vmaf.json")
     graph = (f"[0:v]setpts=PTS-STARTPTS[d];[1:v]setpts=PTS-STARTPTS[r];"
              f"[d][r]libvmaf=n_threads=14:n_subsample={subsample}:pool=harmonic_mean:log_fmt=json:log_path={log}")
     _run(["-i", str(distorted), "-i", str(reference), "-lavfi", graph, "-f", "null", "-"])
     d = json.loads(log.read_text())
     log.unlink(missing_ok=True)
-    frames = sorted(f["metrics"]["vmaf"] for f in d.get("frames", []))
-    p5 = frames[len(frames) // 20] if frames else 0.0
-    return d["pooled_metrics"]["vmaf"]["harmonic_mean"], p5
+    seq = [f["metrics"]["vmaf"] for f in d.get("frames", [])]
+    ordered = sorted(seq)
+    p5 = ordered[len(ordered) // 20] if ordered else 0.0
+    p1 = ordered[len(ordered) // 100] if ordered else 0.0
+    worst, at = window_stats(seq, fps(reference), subsample)
+    return VmafStats(d["pooled_metrics"]["vmaf"]["harmonic_mean"], p5, p1, worst, at)
 
 
 def _samples(src: Path, work: Path) -> list[Path]:
@@ -111,7 +146,7 @@ def _probe(refs: list[Path], crf: int) -> tuple[float, float]:
     for ref in refs:
         out = ref.with_name(f"{ref.stem}.crf{crf}.mp4")
         _run(["-i", str(ref), "-map", "0:v:0", *X265, "-crf", str(crf), str(out)])
-        worst = min(worst, vmaf(out, ref, subsample=2)[0])
+        worst = min(worst, vmaf(out, ref, subsample=2).hmean)
         out_bytes += out.stat().st_size
         in_bytes += _shown_video_bytes(ref)
         out.unlink()
@@ -189,7 +224,7 @@ def _adaptive_encode(src: Path, work: Path) -> EncodeResult:
     _run(["-i", str(raw), "-i", str(src), "-map", "0:v", "-map", "0:a?",
           *(["-map", f"1:{gpmd}"] if gpmd is not None else []),
           "-c", "copy", "-map_metadata", "0", "-color_range", "pc" if container_full else "tv",
-          "-tag:v", "hvc1", str(out)])
+          "-movflags", "+write_colr", "-tag:v", "hvc1", str(out)])
     raw.unlink()
     if color_range(out) != (bitstream_full, container_full):
         out.unlink()
@@ -198,8 +233,13 @@ def _adaptive_encode(src: Path, work: Path) -> EncodeResult:
     if ratio > 1 - config.MIN_SAVING:
         out.unlink()
         return EncodeResult(False, src, crf, None, ratio, reason=f"real saving {1 - ratio:.0%} too small")
-    score, p5 = vmaf(out, src, subsample=4)
-    if score < config.MIN_VMAF or p5 < config.MIN_VMAF_P5:
+    v = vmaf(out, src, subsample=4)
+    stats = {"p5": round(v.p5, 1), "p1": round(v.p1, 1), "worst_2s": round(v.worst_window, 1),
+             "worst_2s_at": round(v.worst_window_at_s, 1)}
+    if (v.hmean < config.MIN_VMAF or v.p5 < config.MIN_VMAF_P5 or v.p1 < config.MIN_VMAF_P1
+            or v.worst_window < config.MIN_VMAF_WINDOW):
         out.unlink()
-        return EncodeResult(False, src, crf, score, ratio, reason=f"real VMAF {score:.1f} (p5 {p5:.1f}) below target")
-    return EncodeResult(True, out, crf, score, ratio, reason="ok")
+        return EncodeResult(False, src, crf, v.hmean, ratio, stats=stats,
+                            reason=f"real VMAF {v.hmean:.1f} p5 {v.p5:.1f} p1 {v.p1:.1f} "
+                                   f"worst 2 s {v.worst_window:.1f} at {v.worst_window_at_s:.0f} s - below target")
+    return EncodeResult(True, out, crf, v.hmean, ratio, reason="ok", stats=stats)

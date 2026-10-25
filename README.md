@@ -16,5 +16,4 @@ python3.12 -m venv .venv && .venv/bin/pip install -r photos_migration/requiremen
 
 The project started as an AWS CDK app (EventBridge → Step Functions → Lambda → S3 Glacier
 Deep Archive). That stack and its buckets were **deleted on 2026-10-20** and must **not** be
-redeployed: it ran in a work AWS account. The code is kept only in the git tag
-[`aws-legacy`](../../tree/aws-legacy) for reference.
+redeployed: it ran in a work AWS account. Its code is only in git history.

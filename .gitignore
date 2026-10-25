@@ -105,3 +105,14 @@ lambda_layer/python/bin/
 local/
 .venv/
 .ruff_cache/
+*token*.json
+*cookies*.txt
+*.csv
+*inventory*.json
+trip_names.json
+*.zip
+*.part
+*.sqlite3-*
+*.GPR
+*.[mM][oO][vV]
+*.[hH][eE][iI][cC]

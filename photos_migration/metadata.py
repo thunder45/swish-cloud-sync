@@ -30,6 +30,11 @@ def is_clock_reset(dt: datetime | None) -> bool:
     return dt is not None and dt.year <= CLOCK_RESET_YEAR
 
 
+class ClockReset(Exception):
+    """The camera clock was reset and nothing (GPS, source video) gives the real time.
+    Never fall back to GoPro's captured_at here: it is derived from the same wrong clock."""
+
+
 @dataclass
 class Capture:
     utc: datetime                  # aware, UTC
@@ -41,6 +46,7 @@ class Capture:
     source: str = ""               # how utc/offset were determined
     camera_clock_error_s: float | None = None
     model: str | None = None
+    clock_ref: str | None = None   # 'local' or 'utc': what camera_clock_error_s was measured against
 
     @property
     def local(self) -> datetime:
@@ -190,8 +196,13 @@ def capture_for_video(item: dict, path: Path, hint: str | None = None) -> Captur
             # camera clock vs true local (or vs UTC when the file stores UTC)
             err_local = (camera_clock - cap.local).total_seconds()
             err_utc = (camera_clock - utc.replace(tzinfo=None)).total_seconds()
-            cap.camera_clock_error_s = err_local if abs(err_local) <= abs(err_utc) else err_utc
+            if abs(err_local) <= abs(err_utc):
+                cap.camera_clock_error_s, cap.clock_ref = err_local, "local"
+            else:
+                cap.camera_clock_error_s, cap.clock_ref = err_utc, "utc"
         return cap
+    if is_clock_reset(camera_clock):
+        raise ClockReset(f"camera clock {camera_clock} and no GPS fix")
     return capture_from_cloud(item, camera_clock, hint, model)
 
 
@@ -201,6 +212,8 @@ def capture_from_cloud(item: dict, camera_clock: datetime | None, hint: str | No
     cloud = _parse_cloud(item.get("captured_at"))
     if cloud is None:
         raise ValueError(f"no capture time for {item.get('id')}")
+    if is_clock_reset(camera_clock) or is_clock_reset(cloud):
+        raise ClockReset(f"camera clock {camera_clock}, cloud captured_at {cloud}")
     hint_src = "hint" if hint else "default"
     if (item.get("content_source") or "").startswith("gp-cah"):
         # camera wall clock stored as if it were UTC; a chapter's own CreateDate is its real start
@@ -225,6 +238,7 @@ def capture_for_photo(item: dict, path: Path, hint: str | None = None) -> tuple[
 
     - EXIF date + GPS: left untouched (the place gives Google the zone).
     - EXIF date, no GPS: only the UTC offset tags get written.
+    - reset camera clock: GPS time if the photo has one, else ClockReset.
     - no EXIF date (frame grabs): (None, True) - caller supplies the capture.
     """
     t = exiftool(path, "-EXIF:DateTimeOriginal", "-Composite:GPSLatitude", "-Composite:GPSLongitude",
@@ -239,7 +253,7 @@ def capture_for_photo(item: dict, path: Path, hint: str | None = None) -> tuple[
         off, tz = (offset_minutes(land, utc), land) if land else zone_offset(hint, utc=utc)
         return Capture(utc, off, tz, lat, lon, t.get("Main:GPSAltitude"), "gps-time (camera clock reset)"), True
     if is_clock_reset(dto):
-        return None, True          # caller must find the real time (source video, segment offset)
+        raise ClockReset(f"camera clock {dto} and no GPS time")
     if dto and lat is not None and lon is not None:
         land = tz_at(lat, lon)
         off, tz = zone_offset(land or hint, wall=dto)
