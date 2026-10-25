@@ -1,1 +1,0 @@
-# Token Validator Lambda Function

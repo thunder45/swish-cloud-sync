@@ -1,1 +1,0 @@
-# Media Authenticator Lambda function

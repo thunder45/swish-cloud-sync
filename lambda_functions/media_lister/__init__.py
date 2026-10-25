@@ -1,1 +1,0 @@
-# Media Lister Lambda function
